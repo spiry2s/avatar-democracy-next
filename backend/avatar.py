@@ -17,17 +17,19 @@ decides how the citizen would want to vote.
 
 from __future__ import annotations
 
-import json
-import os
+import logging
 import re
 from dataclasses import dataclass, asdict
 from typing import Any
 
 from anthropic import Anthropic
 
-from backend import questionnaire
-from backend.config import MODEL, CHECKER_MODEL, MULTI_MODEL_CHECK, DELEGATE_DRIFT_CHECK
+from backend import config, llm, questionnaire
+from backend.llm import LEVEL, POSITION, STR, arr, enum, obj, section_id_field
 from backend.profile import CitizenProfile
+from backend.sections import WHOLE_BILL, norm_key, norm_name, section_ids
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,7 +91,7 @@ Strict rules:
 
 7. SURFACE CONFLICTS. If the citizen's own delegates or values point in opposite directions on this bill, note it in key_tension rather than silently picking a side.
 
-Output ONLY a single JSON object matching the schema. No prose, no markdown fences."""
+Your output is a JSON object; the field meanings are described in the request."""
 
 
 def _build_config_block(profile: CitizenProfile) -> str:
@@ -143,7 +145,7 @@ def _build_bill_block(analysis: dict[str, Any]) -> str:
     lines.append(f"SECTIONS TO VOTE ON ({len(sections)}):")
     if not sections:
         lines.append("  (no sections were identified — treat the whole bill as one section "
-                     "with section_id 'whole_bill')")
+                     f"with section_id '{WHOLE_BILL}')")
     for s in sections:
         lines.append("")
         lines.append(f"  [{s.get('section_id', '?')}] {s.get('heading', '')}")
@@ -176,34 +178,63 @@ def _build_bill_block(analysis: dict[str, Any]) -> str:
 
 
 VOTE_INSTRUCTIONS = """
-Cast this citizen's vote on each section. Output ONLY this JSON object:
+Cast this citizen's vote on each section listed above (one entry per section).
 
-{
-  "section_votes": [
-    {
-      "section_id": "matches the section id from the analysis",
-      "heading": "short heading for the section",
-      "position": "yes | no | abstain",
-      "basis": "delegate:<name> | values | compass",
-      "reasoning": "Plain-language explanation tracing to the citizen's configuration. If following a delegate, name them and their relevant known position. If abstaining, say why the config doesn't determine a position.",
-      "confidence": "high | medium | low"
-    }
-  ],
-  "recommendation": "2-3 sentence overall summary for the citizen, e.g. how many sections they'd support and where the bill conflicts with their preferences.",
-  "would_pass_sections": ["section_ids voted yes"],
-  "key_tension": "Any place the citizen's own delegates or values pull in opposite directions on this bill. Empty string if none."
-}
+Field guide:
+- section_id: the section's id exactly as listed.
+- heading: short heading for the section.
+- position: yes | no | abstain.
+- basis: "delegate:<name>" when following a delegate, else "values" or "compass".
+- reasoning: plain-language explanation tracing to the citizen's configuration. If following a delegate, name them and the relevant position. If abstaining, say why the config doesn't determine a position.
+- confidence: high | medium | low.
+- recommendation: 2-3 sentence overall summary for the citizen, e.g. how many sections they'd support and where the bill conflicts with their preferences.
+- would_pass_sections: section_ids voted yes.
+- key_tension: any place the citizen's own delegates or values pull in opposite directions on this bill. Empty string if none.
 """
 
 
+def _basis_field(profile: CitizenProfile) -> dict[str, Any]:
+    """Basis is constrained to the active delegates' exact names, so the drift
+    check can attribute a vote to a delegate without fuzzy matching."""
+    return enum(["values", "compass"] + [f"delegate:{d.name}" for d in profile.active_delegates()])
+
+
+def _vote_schema(analysis: dict[str, Any], profile: CitizenProfile) -> dict[str, Any]:
+    sid = section_id_field(section_ids(analysis))
+    return obj({
+        "section_votes": arr(obj({
+            "section_id": sid,
+            "heading": STR,
+            "position": POSITION,
+            "basis": _basis_field(profile),
+            "reasoning": STR,
+            "confidence": LEVEL,
+        })),
+        "recommendation": STR,
+        "would_pass_sections": arr(sid),
+        "key_tension": STR,
+    })
+
+
+def _positions_schema(analysis: dict[str, Any]) -> dict[str, Any]:
+    return obj({"votes": arr(obj({
+        "section_id": section_id_field(section_ids(analysis)),
+        "position": POSITION,
+    }))})
+
+
 def get_client() -> Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY environment variable not set. "
-            "Get a key at https://console.anthropic.com"
-        )
-    return Anthropic(api_key=api_key)
+    return llm.get_client()
+
+
+def _vote_prompt(profile: CitizenProfile, analysis: dict[str, Any], instructions: str) -> str:
+    return (
+        _build_config_block(profile)
+        + "\n\n---\n\n"
+        + _build_bill_block(analysis)
+        + "\n\n---\n"
+        + instructions
+    )
 
 
 def cast_vote(
@@ -214,65 +245,46 @@ def cast_vote(
     """
     Cast the citizen's Avatar vote on a bill.
 
-    Args:
-        analysis: a bill analysis dict (as produced by summarizer.BillAnalysis.to_dict()).
-        profile: the citizen's configuration.
-        client: optional pre-configured Anthropic client.
-
     Raises:
-        ValueError: if the response can't be parsed.
+        ValueError: if the response is unusable.
         RuntimeError: if the API key is not configured.
     """
-    if client is None:
-        client = get_client()
-
-    prompt = (
-        _build_config_block(profile)
-        + "\n\n---\n\n"
-        + _build_bill_block(analysis)
-        + "\n\n---\n"
-        + VOTE_INSTRUCTIONS
-    )
-
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
+    data = llm.call_json(
+        name="vote",
+        model=config.MODEL,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        prompt=_vote_prompt(profile, analysis, VOTE_INSTRUCTIONS),
+        schema=_vote_schema(analysis, profile),
+        max_tokens=64000,
+        effort=config.MODEL_EFFORT,
+        client=client,
     )
 
-    response_text = "".join(
-        block.text for block in message.content if hasattr(block, "text")
-    ).strip()
-
-    if response_text.startswith("```"):
-        lines = response_text.split("\n")
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        response_text = "\n".join(lines[1:end])
-
-    try:
-        data = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Could not parse Avatar response as JSON: {e}\n\nResponse:\n{response_text[:500]}"
-        ) from e
-
-    section_votes = [
-        SectionVote(
-            section_id=str(v.get("section_id", "?")),
+    by_id: dict[str, SectionVote] = {}
+    for v in data.get("section_votes", []):
+        sid = str(v.get("section_id", ""))
+        by_id.setdefault(sid, SectionVote(
+            section_id=sid,
             heading=v.get("heading", ""),
             position=v.get("position", "abstain"),
             basis=v.get("basis", "compass"),
             reasoning=v.get("reasoning", ""),
             confidence=v.get("confidence", "low"),
+        ))
+    # A section the model skipped becomes an explicit abstention, never a silent gap.
+    headings = {str(s.get("section_id")): s.get("heading", "") for s in analysis.get("sections", [])}
+    section_votes = [
+        by_id.get(sid) or SectionVote(
+            section_id=sid, heading=headings.get(sid, ""), position="abstain",
+            basis="compass", reasoning="The Avatar returned no vote for this section.",
+            confidence="low",
         )
-        for v in data.get("section_votes", [])
+        for sid in section_ids(analysis)
     ]
 
     # Capture defense: cross-check with a second model. Best-effort — a checker
-    # failure must never break the primary vote.
-    if MULTI_MODEL_CHECK and section_votes:
+    # failure must never break the primary vote, but it is logged.
+    if config.MULTI_MODEL_CHECK and section_votes:
         try:
             checker = cross_check(analysis, profile, client)
             primary = {sv.section_id: sv.position for sv in section_votes}
@@ -282,11 +294,11 @@ def cast_vote(
                     sv.divergent = True
                     sv.confidence = "low"
         except Exception:
-            pass
+            log.exception("cross-check failed; vote returned without divergence flags")
 
     # Capture defense: does a vote attributed to a grounded delegate actually match
     # that delegate's own recorded positions? Best-effort.
-    if DELEGATE_DRIFT_CHECK and section_votes:
+    if config.DELEGATE_DRIFT_CHECK and section_votes:
         try:
             section_dicts = [
                 {"section_id": sv.section_id, "basis": sv.basis, "position": sv.position}
@@ -297,13 +309,13 @@ def cast_vote(
                 if sv.section_id in drifted:
                     sv.delegate_drift = True
         except Exception:
-            pass
+            log.exception("drift check failed; vote returned without drift flags")
 
     return AvatarVote(
         bill_title=analysis.get("title", "Untitled bill"),
         section_votes=section_votes,
         recommendation=data.get("recommendation", ""),
-        would_pass_sections=data.get("would_pass_sections", []),
+        would_pass_sections=[sv.section_id for sv in section_votes if sv.position == "yes"],
         key_tension=data.get("key_tension", ""),
     )
 
@@ -311,11 +323,7 @@ def cast_vote(
 CHECK_INSTRUCTIONS = """
 You are an INDEPENDENT second opinion double-checking how this citizen would vote.
 Apply the same rules in the same priority order: delegate -> values -> compass ->
-abstain. Do not be swayed by the bill's framing.
-
-Output ONLY a JSON object mapping each section_id to a position:
-{"<section_id>": "yes" | "no" | "abstain", ...}
-No prose, no markdown fences.
+abstain. Do not be swayed by the bill's framing. Give one position per section.
 """
 
 
@@ -326,46 +334,25 @@ def cross_check(
 ) -> dict[str, str]:
     """Run a second, independent model over the same vote and return its per-section
     positions {section_id: position}. Used to flag divergence; never authoritative."""
-    if client is None:
-        client = get_client()
-
-    prompt = (
-        _build_config_block(profile)
-        + "\n\n---\n\n"
-        + _build_bill_block(analysis)
-        + "\n\n---\n"
-        + CHECK_INSTRUCTIONS
-    )
-    message = client.messages.create(
-        model=CHECKER_MODEL,
-        max_tokens=2000,
+    data = llm.call_json(
+        name="cross_check",
+        model=config.CHECKER_MODEL,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        prompt=_vote_prompt(profile, analysis, CHECK_INSTRUCTIONS),
+        schema=_positions_schema(analysis),
+        max_tokens=16000,
+        client=client,
     )
-    text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        text = "\n".join(lines[1:end])
-
-    data = json.loads(text)
-    # The checker often embellishes (returns full vote objects, varied id formats).
-    # Coerce each entry to a clean position and a canonical key; non-position
-    # entries (recommendation/tension) coerce to "" and are dropped.
-    out: dict[str, str] = {}
-    for k, v in data.items():
-        pos = _coerce_position(v)
-        if pos:
-            out[_norm_key(str(k))] = pos
-    return out
+    return {str(v["section_id"]): v["position"] for v in data.get("votes", [])}
 
 
 _POS_RE = re.compile(r"position['\"]?\s*[:=]\s*['\"]?(yes|no|abstain)", re.IGNORECASE)
 
 
 def _coerce_position(value: Any) -> str:
-    """Extract a yes/no/abstain position from a checker value that may be a clean
-    string, a nested object, or a stringified vote object."""
+    """Extract a yes/no/abstain position from a value that may be a clean string,
+    a nested object, or a stringified vote object. Structured outputs make this a
+    safety net rather than the main path."""
     if isinstance(value, dict):
         value = value.get("position", "")
     s = str(value).strip().lower()
@@ -375,23 +362,18 @@ def _coerce_position(value: Any) -> str:
     return m.group(1).lower() if m else ""
 
 
-def _norm_key(section_id: str) -> str:
-    """Canonicalize a section id to its distinctive part so differing model
-    formats still match: 'Sec. 101', 'sec_101', 'Section 101', '101' -> '101'."""
-    s = re.sub(r"[^a-z0-9]+", " ", str(section_id).lower())
-    s = re.sub(r"\b(?:section|sec)\b", " ", s)
-    return re.sub(r"\s+", "", s)
+_norm_key = norm_key
 
 
 def find_divergences(primary: dict[str, str], checker: dict[str, str]) -> set[str]:
     """Section ids (original primary keys) where the checker expressed a position
     that differs from the primary vote. Keys are normalized so differing id
     formats still match; sections the checker omitted are not flagged."""
-    norm_checker = {_norm_key(k): v for k, v in checker.items()}
+    norm_checker = {norm_key(k): _coerce_position(v) for k, v in checker.items()}
     diverged = set()
     for section_id, position in primary.items():
-        other = norm_checker.get(_norm_key(section_id))
-        if other is not None and other != str(position).strip().lower():
+        other = norm_checker.get(norm_key(section_id))
+        if other and other != str(position).strip().lower():
             diverged.add(section_id)
     return diverged
 
@@ -402,7 +384,7 @@ def _delegate_followed_sections(
     """Sections whose vote was driven by a GROUNDED delegate (basis 'delegate:<name>'
     where that active delegate has recorded positions). Pure — no API."""
     grounded = {
-        d.name.strip().lower(): d.sources
+        norm_name(d.name): (d.name, d.sources)
         for d in profile.active_delegates()
         if d.sources
     }
@@ -410,12 +392,12 @@ def _delegate_followed_sections(
     for sv in section_votes:
         basis = sv.get("basis") or ""
         if basis.startswith("delegate:"):
-            name = basis[len("delegate:"):].strip()
-            if name.lower() in grounded:
+            match = grounded.get(norm_name(basis[len("delegate:"):]))
+            if match:
                 out.append({
                     "section_id": sv.get("section_id"),
-                    "delegate": name,
-                    "sources": grounded[name.lower()],
+                    "delegate": match[0],
+                    "sources": match[1],
                     "position": sv.get("position", "abstain"),
                 })
     return out
@@ -433,14 +415,11 @@ def detect_drift(
     targets = _delegate_followed_sections(profile, section_votes)
     if not targets:
         return set()
-    if client is None:
-        client = get_client()
 
     summaries = {str(s.get("section_id")): s.get("summary", "") for s in analysis.get("sections", [])}
     lines = [
-        "For each item, decide ONLY how the named delegate would vote on that section",
+        "For each item, decide ONLY how the named delegate would vote on that section,",
         "based strictly on their recorded positions below — not your own opinion.",
-        'Output ONLY JSON mapping section_id to a position: {"<section_id>": "yes|no|abstain"}.',
         "",
     ]
     for t in targets:
@@ -450,23 +429,15 @@ def detect_drift(
             lines.append(f"  recorded position [{s.get('title', '')}]: {s.get('text', '')}")
         lines.append("")
 
-    message = client.messages.create(
-        model=CHECKER_MODEL,
-        max_tokens=1000,
-        messages=[{"role": "user", "content": "\n".join(lines)}],
+    target_ids = list(dict.fromkeys(str(t["section_id"]) for t in targets))
+    data = llm.call_json(
+        name="drift",
+        model=config.CHECKER_MODEL,
+        prompt="\n".join(lines),
+        schema=obj({"votes": arr(obj({"section_id": enum(target_ids), "position": POSITION}))}),
+        max_tokens=8000,
+        client=client,
     )
-    text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
-    if text.startswith("```"):
-        rows = text.split("\n")
-        end = len(rows) - 1 if rows[-1].strip() == "```" else len(rows)
-        text = "\n".join(rows[1:end])
-
-    data = json.loads(text)
-    expected = {}
-    for k, v in data.items():
-        pos = _coerce_position(v)
-        if pos:
-            expected[_norm_key(str(k))] = pos
-
+    expected = {str(v["section_id"]): v["position"] for v in data.get("votes", [])}
     cast = {t["section_id"]: t["position"] for t in targets}
     return find_divergences(cast, expected)

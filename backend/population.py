@@ -15,13 +15,12 @@ just a compass). Persisted to data/population.json and reused across votes.
 
 from __future__ import annotations
 
-import json
 import random
 import time
 from pathlib import Path
 from typing import Any
 
-from backend import config
+from backend import config, storage
 from backend.questionnaire import AXES
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -62,17 +61,12 @@ def generate_population(size: int | None = None, seed: int | None = None) -> lis
 
 def load_population() -> list[dict[str, Any]]:
     """Load the population, generating a default one on first use."""
-    if not POPULATION_FILE.exists():
-        return generate_population()
-    try:
-        return json.loads(POPULATION_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return generate_population()
+    data = storage.read_json(POPULATION_FILE)  # synthetic: corrupt -> raise, don't hide
+    return data if data is not None else generate_population()
 
 
 def save_population(citizens: list[dict[str, Any]]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    POPULATION_FILE.write_text(json.dumps(citizens, indent=2), encoding="utf-8")
+    storage.write_json(POPULATION_FILE, citizens)
 
 
 def summary(citizens: list[dict[str, Any]] | None = None) -> dict[str, Any]:

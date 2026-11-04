@@ -14,14 +14,16 @@ share the same passage logic.
 
 from __future__ import annotations
 
-import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from backend import config
+from backend import config, storage
+
+log = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 BILLS_DIR = DATA_DIR / "bills"
@@ -277,24 +279,36 @@ def compute_result(section_tallies: list[dict[str, Any]], ratio: float) -> dict[
 # ── persistence ──────────────────────────────────────────────────────────────
 
 
+def bill_lock(bill_id: str):
+    """Serialize read-modify-write on one bill (e.g. two concurrent vote requests)."""
+    return storage.lock(f"bill:{bill_id}")
+
+
+def _path(bill_id: str) -> Path:
+    # Ids are generated as 'bill-<hex>'; reject anything else so a crafted id
+    # can't address files outside BILLS_DIR.
+    if not bill_id.startswith("bill-") or not bill_id[5:].isalnum():
+        raise KeyError(bill_id)
+    return BILLS_DIR / f"{bill_id}.json"
+
+
 def save_bill(bill: Bill) -> None:
-    BILLS_DIR.mkdir(parents=True, exist_ok=True)
     bill.updated_at = time.time()
     # to_dict adds derived fields; strip them before persisting the canonical form
     data = bill.to_dict()
     for derived in ("total_endorsements", "cooling_off_remaining"):
         data.pop(derived, None)
-    (BILLS_DIR / f"{bill.id}.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+    storage.write_json(_path(bill.id), data)
 
 
 def load_bill(bill_id: str) -> Bill | None:
-    path = BILLS_DIR / f"{bill_id}.json"
-    if not path.exists():
-        return None
+    """The bill, or None if it doesn't exist. Raises storage.CorruptStateError."""
     try:
-        return Bill.from_dict(json.loads(path.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError, KeyError):
+        path = _path(bill_id)
+    except KeyError:
         return None
+    data = storage.read_json(path)
+    return Bill.from_dict(data) if data is not None else None
 
 
 def list_bills() -> list[Bill]:
@@ -303,8 +317,10 @@ def list_bills() -> list[Bill]:
     bills = []
     for path in BILLS_DIR.glob("*.json"):
         try:
-            bills.append(Bill.from_dict(json.loads(path.read_text(encoding="utf-8"))))
-        except (json.JSONDecodeError, OSError, KeyError):
-            continue
+            data = storage.read_json(path)
+            if data is not None:
+                bills.append(Bill.from_dict(data))
+        except (storage.CorruptStateError, KeyError) as e:
+            log.warning("skipping unreadable bill file %s: %s", path.name, e)
     bills.sort(key=lambda b: b.created_at, reverse=True)
     return bills

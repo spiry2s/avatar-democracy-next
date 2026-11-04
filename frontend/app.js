@@ -153,8 +153,14 @@ function renderResults(a, sourceChars) {
   resultsTitle.textContent = a.title || 'Analysis';
 
   // Summary
+  const m = a.metadata || {};
+  const truncatedWarning = m.truncated
+    ? `<p class="truncation-warning">⚠ This bill was too long to analyze in full. Only the first `
+      + `${Number(m.analyzed_chars).toLocaleString()} of ${Number(m.total_chars).toLocaleString()} characters were read — `
+      + `provisions after that point were not checked for red flags.</p>`
+    : '';
   document.getElementById('summary-body').innerHTML =
-    `<p>${escHtml(a.plain_summary)}</p>` + renderMetadata(a.metadata, sourceChars);
+    truncatedWarning + `<p>${escHtml(a.plain_summary)}</p>` + renderMetadata(a.metadata, sourceChars);
 
   // Sections
   const sectionsCard = document.getElementById('sections-card');

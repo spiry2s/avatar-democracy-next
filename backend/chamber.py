@@ -10,38 +10,37 @@ values/delegates count; its position is folded into the tally.
 
 The output tally has the same shape bills.compute_result expects, so passage
 (per-section, no Christmas-tree bills) is computed by the logic already tested.
+
+Integrity rule: a section the tagger did not cover must NOT be quietly decided
+by the operator alone (the whole population would abstain on it). Callers check
+missing_tags() and refuse to record a result instead.
 """
 
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
 from anthropic import Anthropic
 
-from backend.config import MODEL, CHAMBER_VOTE_TAU
+from backend import config, llm
+from backend.llm import NUM, arr, obj, section_id_field
 from backend.questionnaire import AXES
+from backend.sections import WHOLE_BILL, lookup, section_ids
 
 AXIS_NAMES = list(AXES.keys())
-
-
-def get_client() -> Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY environment variable not set.")
-    return Anthropic(api_key=api_key)
 
 
 # ── deterministic compass vote (pure) ────────────────────────────────────────
 
 
-def deterministic_vote(compass: dict[str, float], tag: dict[str, float], tau: float = CHAMBER_VOTE_TAU) -> str:
+def deterministic_vote(compass: dict[str, float], tag: dict[str, float], tau: float | None = None) -> str:
     """A citizen with this compass voting on a section with this axis tag.
 
-    Alignment is the normalized dot product of compass and tag. A positive
-    alignment means the section advances poles the citizen favors -> yes.
+    Alignment is the compass weighted by the tag, normalized by the tag's L1
+    norm. A positive alignment means the section advances poles the citizen
+    favors -> yes.
     """
+    tau = config.CHAMBER_VOTE_TAU if tau is None else tau
     align = 0.0
     norm = 0.0
     for axis in AXIS_NAMES:
@@ -56,36 +55,41 @@ def deterministic_vote(compass: dict[str, float], tag: dict[str, float], tau: fl
     return "abstain"
 
 
+def missing_tags(analysis: dict[str, Any], section_tags: dict[str, dict[str, float]]) -> list[str]:
+    """Section ids that have no axis tag (exact or normalized match)."""
+    return [sid for sid in section_ids(analysis) if lookup(section_tags, sid) is None]
+
+
 def aggregate(
     analysis: dict[str, Any],
     operator_vote: dict[str, Any] | None,
     population: list[dict[str, Any]],
     section_tags: dict[str, dict[str, float]],
-    tau: float = CHAMBER_VOTE_TAU,
+    tau: float | None = None,
 ) -> list[dict[str, Any]]:
     """Per-section vote counts across the operator + the synthetic population.
 
     Pure: takes pre-computed section_tags, returns tallies in compute_result shape.
+    Section ids are matched exactly first, then by normalized form, so 'Sec. 101'
+    in the analysis still finds a tag or vote keyed '101'.
     """
     op_positions: dict[str, str] = {}
     if operator_vote:
         for sv in operator_vote.get("section_votes", []):
             op_positions[str(sv.get("section_id"))] = sv.get("position", "abstain")
 
+    headings = {str(s.get("section_id")): s.get("heading", "") for s in analysis.get("sections", [])}
     tallies = []
-    for section in analysis.get("sections", []):
-        sid = str(section.get("section_id", "?"))
-        tag = section_tags.get(sid, {})
+    for sid in section_ids(analysis):
+        tag = lookup(section_tags, sid)
         counts = {"yes": 0, "no": 0, "abstain": 0}
         by_archetype: dict[str, dict[str, int]] = {}  # aggregate blocs (privacy-safe; never per-citizen)
 
-        # operator's real Avatar (full-engine vote)
         if operator_vote is not None:
-            counts[op_positions.get(sid, "abstain")] += 1
+            counts[lookup(op_positions, sid, "abstain")] += 1
 
-        # synthetic population (deterministic), tallied by archetype bloc
         for citizen in population:
-            v = deterministic_vote(citizen.get("compass", {}), tag, tau)
+            v = deterministic_vote(citizen.get("compass", {}), tag or {}, tau)
             counts[v] += 1
             bucket = by_archetype.setdefault(
                 citizen.get("archetype", "?"), {"yes": 0, "no": 0, "abstain": 0}
@@ -94,11 +98,12 @@ def aggregate(
 
         tallies.append({
             "section_id": sid,
-            "heading": section.get("heading", ""),
+            "heading": headings.get(sid, ""),
             "yes": counts["yes"],
             "no": counts["no"],
             "abstain": counts["abstain"],
             "by_archetype": by_archetype,
+            "tagged": tag is not None,
         })
     return tallies
 
@@ -118,6 +123,7 @@ def _tag_prompt(analysis: dict[str, Any]) -> str:
         "Tag each section of this bill on six political axes. For each section and each axis,",
         "give a number in [-1, 1] for which pole the section ADVANCES if enacted (0 if the axis",
         "is irrelevant to that section). Judge the actual mechanism, not the bill's framing.",
+        "Return exactly one entry per section.",
         "",
         "Axes:",
         _axis_doc(),
@@ -125,43 +131,34 @@ def _tag_prompt(analysis: dict[str, Any]) -> str:
         f"Bill: {analysis.get('title', '')}",
         "Sections:",
     ]
-    for s in analysis.get("sections", []):
+    sections = analysis.get("sections", [])
+    if not sections:
+        lines.append(f"  [{WHOLE_BILL}] (the whole bill): {analysis.get('plain_summary', '')}")
+    for s in sections:
         lines.append(f"  [{s.get('section_id', '?')}] {s.get('heading', '')}: {s.get('summary', '')}")
-    lines.append("")
-    lines.append('Output ONLY JSON: {"<section_id>": {"economic": 0.0, "social": 0.0, "liberty": 0.0, '
-                 '"environment": 0.0, "foreign": 0.0, "governance": 0.0}, ...}. No prose, no fences.')
     return "\n".join(lines)
 
 
+def _tag_schema(analysis: dict[str, Any]) -> dict[str, Any]:
+    return obj({"tags": arr(obj({
+        "section_id": section_id_field(section_ids(analysis)),
+        **{axis: NUM for axis in AXIS_NAMES},
+    }))})
+
+
 def tag_sections(analysis: dict[str, Any], client: Anthropic | None = None) -> dict[str, dict[str, float]]:
-    """One LLM call: map each section_id to a 6-axis tag vector."""
-    if not analysis.get("sections"):
-        return {}
-    if client is None:
-        client = get_client()
-
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=8000,
-        thinking={"type": "adaptive"},
-        messages=[{"role": "user", "content": _tag_prompt(analysis)}],
+    """One LLM call: map each section_id to a 6-axis tag vector in [-1, 1]."""
+    data = llm.call_json(
+        name="tag_sections",
+        model=config.MODEL,
+        prompt=_tag_prompt(analysis),
+        schema=_tag_schema(analysis),
+        max_tokens=32000,
+        client=client,
     )
-    text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        text = "\n".join(lines[1:end])
-
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Could not parse axis tags as JSON: {e}\n\n{text[:400]}") from e
-
-    # Normalize: ensure every section has all axes as floats in [-1, 1]
     tags: dict[str, dict[str, float]] = {}
-    for sid, vec in raw.items():
-        tags[str(sid)] = {
-            axis: max(-1.0, min(1.0, float(vec.get(axis, 0.0)) if isinstance(vec, dict) else 0.0))
-            for axis in AXIS_NAMES
+    for row in data.get("tags", []):
+        tags[str(row["section_id"])] = {
+            axis: max(-1.0, min(1.0, float(row.get(axis, 0.0)))) for axis in AXIS_NAMES
         }
     return tags

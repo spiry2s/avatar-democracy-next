@@ -8,20 +8,12 @@ One cheap LLM call; best-effort (a failure never blocks the lifecycle).
 
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
 from anthropic import Anthropic
 
-from backend.config import CHECKER_MODEL
-
-
-def get_client() -> Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY environment variable not set.")
-    return Anthropic(api_key=api_key)
+from backend import config, llm
+from backend.llm import STR, arr, enum, obj
 
 
 def detect_conflicts(
@@ -40,14 +32,13 @@ def detect_conflicts(
     """
     if not analysis or not passed_bills:
         return []
-    if client is None:
-        client = get_client()
 
     sections = "; ".join(s.get("heading", "") for s in analysis.get("sections", []))
     lines = [
         "A NEW bill is proposed. Identify which, if any, of the PREVIOUSLY PASSED bills it",
         "directly conflicts with — it contradicts, repeals, overrides, duplicates, or is",
-        "legally incompatible with them. Be conservative: only flag genuine conflicts.",
+        "legally incompatible with them. Be conservative: only flag genuine conflicts,",
+        "and return an empty list if there are none. Describe each conflict in one sentence.",
         "",
         f"NEW BILL: {analysis.get('title', '')}",
         f"  summary: {analysis.get('plain_summary', '')}",
@@ -57,33 +48,21 @@ def detect_conflicts(
     ]
     for b in passed_bills:
         lines.append(f"  [{b['id']}] {b.get('title', '')}: {b.get('summary', '')}")
-    lines.append("")
-    lines.append('Output ONLY JSON: a list of {"bill_id": "<id>", "conflict": "<one sentence>"}.')
-    lines.append("Return [] if there are no genuine conflicts. No prose, no markdown fences.")
-
-    message = client.messages.create(
-        model=CHECKER_MODEL,
-        max_tokens=1000,
-        messages=[{"role": "user", "content": "\n".join(lines)}],
-    )
-    text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
-    if text.startswith("```"):
-        rows = text.split("\n")
-        end = len(rows) - 1 if rows[-1].strip() == "```" else len(rows)
-        text = "\n".join(rows[1:end])
-
-    data = json.loads(text)
-    if isinstance(data, dict):
-        data = data.get("conflicts", [])
-    if not isinstance(data, list):
-        return []
 
     titles = {b["id"]: b.get("title", "") for b in passed_bills}
+    data = llm.call_json(
+        name="conflicts",
+        model=config.CHECKER_MODEL,
+        prompt="\n".join(lines),
+        # bill_id is an enum of real passed-bill ids, so hallucinated ids are impossible.
+        schema=obj({"conflicts": arr(obj({"bill_id": enum(list(titles)), "conflict": STR}))}),
+        max_tokens=8000,
+        client=client,
+    )
+
     out = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
+    for item in data.get("conflicts", []):
         bid = str(item.get("bill_id", "")).strip()
-        if bid in titles:  # only real passed-bill ids (drops hallucinations)
+        if bid in titles:
             out.append({"bill_id": bid, "title": titles[bid], "conflict": str(item.get("conflict", "")).strip()})
     return out

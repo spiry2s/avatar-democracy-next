@@ -1069,3 +1069,12 @@ a.logo:hover { opacity: 0.85; text-decoration: none; }
   .arch-name { width: 84px; font-size: 0.78rem; }
   .stat-big { font-size: 2.4rem; }
 }
+
+.truncation-warning {
+  background: #fff4e5;
+  border-left: 4px solid #e8890c;
+  color: #7a4500;
+  padding: 0.6rem 0.8rem;
+  border-radius: 4px;
+  margin-bottom: 0.8rem;
+}

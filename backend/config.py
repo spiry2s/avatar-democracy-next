@@ -29,12 +29,25 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-# Model used for both the neutral analyzer and the Avatar voting engine.
-# Opus-tier: red-flag detection and value-grounded voting are the quality-critical
-# path, and Opus now costs ~1.7x Sonnet ($5/$25 vs $3/$15 per MTok), not the old
-# 5x premium. Override with AVATAR_MODEL=claude-sonnet-4-6 for cheaper runs or
-# claude-fable-5 for the premium tier (both also support adaptive thinking).
-MODEL = os.environ.get("AVATAR_MODEL", "claude-opus-4-8")
+# Model used for the neutral analyzer, the Avatar voting engine, and axis tagging.
+# Override with AVATAR_MODEL (e.g. claude-sonnet-5-5 for cheaper runs, or
+# claude-fable-5-1 for the most capable tier).
+MODEL = os.environ.get("AVATAR_MODEL", "claude-opus-5-5")
+
+# Reasoning effort for the quality-critical calls (analysis, vote). Opus 5.5
+# defaults to "medium"; red-flag detection benefits from more.
+MODEL_EFFORT = os.environ.get("AVATAR_EFFORT", "high")
+
+# Bill text beyond this is cut, and the cut is reported to the citizen. ~1.5M
+# chars is roughly 400K tokens, well inside the 1M-token context window.
+MAX_BILL_CHARS = _int_env("MAX_BILL_CHARS", 1_500_000)
+
+# Upload / URL-fetch size cap.
+MAX_SOURCE_BYTES = _int_env("MAX_SOURCE_BYTES", 25 * 1024 * 1024)
+
+# Access token. Required for every request when set. If the server binds to a
+# non-loopback address without one, main.py generates one at startup.
+ACCESS_TOKEN = os.environ.get("AVATAR_ACCESS_TOKEN", "")
 
 # Endorsement thresholds by bill scope (white paper decision 8).
 # Real numbers for a US-sized population: ~50,000 ordinary, ~500,000 major,
@@ -69,8 +82,9 @@ CHAMBER_VOTE_TAU = _float_env("CHAMBER_VOTE_TAU", 0.12)
 
 # Capture defense (white paper decisions 25, 28): cross-check the operator's vote
 # with a second, independent model and flag sections where the two disagree, so no
-# single model silently decides. Cheap model keeps the overhead small.
-CHECKER_MODEL = os.environ.get("CHECKER_MODEL", "claude-haiku-4-5")
+# single model silently decides. A different model family member keeps the check
+# independent; Haiku keeps the overhead small.
+CHECKER_MODEL = os.environ.get("CHECKER_MODEL", "claude-haiku-5-5")
 MULTI_MODEL_CHECK = os.environ.get("MULTI_MODEL_CHECK", "1") not in ("0", "false", "False", "")
 
 # Capture defense (white paper decision 30): flag when a delegate-followed vote is

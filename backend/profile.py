@@ -17,7 +17,7 @@ deployment would key profiles by verified eID. citizen_id defaults to "local".
 
 from __future__ import annotations
 
-import json
+
 import os
 import time
 import uuid
@@ -25,7 +25,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any
 
-from backend import audit
+from backend import storage
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 PROFILE_FILE = DATA_DIR / "profile.json"
@@ -188,21 +188,20 @@ class CitizenProfile:
 
 # ── persistence ────────────────────────────────────────────────────────────────
 
+PROFILE_LOCK = "profile"
+
+
 def load_profile() -> CitizenProfile | None:
-    """Load the stored profile, or None if none exists yet."""
-    if not PROFILE_FILE.exists():
-        return None
-    try:
-        data = json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return CitizenProfile.from_dict(data)
+    """Load the stored profile, or None if none exists yet.
+
+    Raises storage.CorruptStateError if the file exists but is unreadable — the
+    caller must not treat that as "no profile" and overwrite it.
+    """
+    data = storage.read_json(PROFILE_FILE)
+    return CitizenProfile.from_dict(data) if data is not None else None
 
 
 def save_profile(profile: CitizenProfile) -> None:
-    """Persist the profile to disk."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    """Persist the profile to disk atomically."""
     profile.updated_at = time.time()
-    PROFILE_FILE.write_text(
-        json.dumps(profile.to_dict(), indent=2), encoding="utf-8"
-    )
+    storage.write_json(PROFILE_FILE, profile.to_dict())

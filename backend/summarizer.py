@@ -8,16 +8,13 @@ so prompt work isn't buried in orchestration complexity.
 
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from anthropic import Anthropic
 
-from backend.config import MODEL
-
-MAX_SINGLE_PASS_CHARS = 200_000
+from backend import config, llm
+from backend.llm import INT, LEVEL, STR, arr, enum, obj
 
 
 @dataclass
@@ -60,12 +57,12 @@ Core principles:
 
 6. ACKNOWLEDGE YOUR OWN BIAS. If you notice partisan framing in your own analysis, flag it in open_questions.
 
-Output ONLY a single JSON object matching the schema provided. No prose before or after. No markdown code fences. Just JSON."""
+Your output is a JSON object; the field meanings are described in the request."""
 
 
-ANALYSIS_PROMPT = """Analyze the following legislative bill and produce a structured JSON analysis.
+ANALYSIS_PROMPT = """Analyze the following legislative bill and produce a structured analysis.
 
-Output JSON schema:
+Field guide:
 
 {
   "title": "Plain-language descriptive title (NOT the bill's official name unless accurate)",
@@ -120,65 +117,91 @@ Red flag types:
 
 Be thorough on red flags. Citizens depend on you to find what others miss.
 
-Bill text follows. Output ONLY the JSON.
+Bill text follows.
 
 ---
 
 """
 
 
-def get_client() -> Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY environment variable not set. "
-            "Get a key at https://console.anthropic.com"
-        )
-    return Anthropic(api_key=api_key)
+RED_FLAG_TYPES = [
+    "buried_provision", "broad_delegation", "definition_change", "asymmetric_sunset",
+    "hidden_funding", "cross_reference", "vague_language", "exemption",
+    "retroactive_effect", "severability_risk",
+]
+
+ANALYSIS_SCHEMA = obj({
+    "title": STR,
+    "plain_summary": STR,
+    "sections": arr(obj({
+        "section_id": STR,
+        "heading": STR,
+        "summary": STR,
+        "significance": LEVEL,
+        "significance_reason": STR,
+    })),
+    "beneficiaries": obj({"benefits": arr(STR), "costs": arr(STR), "regulated": arr(STR)}),
+    "red_flags": arr(obj({
+        "type": enum(RED_FLAG_TYPES),
+        "section": STR,
+        "description": STR,
+        "severity": LEVEL,
+    })),
+    "comparable_laws": arr(STR),
+    "open_questions": arr(STR),
+    "metadata": obj({
+        "estimated_pages": INT,
+        "complexity": LEVEL,
+        "primary_subject": STR,
+        "your_confidence": LEVEL,
+    }),
+})
 
 
 def analyze_bill(bill_text: str, client: Anthropic | None = None) -> BillAnalysis:
     """
     Analyze a bill and return structured output.
 
+    If the bill is longer than config.MAX_BILL_CHARS it is cut, and the cut is
+    recorded in metadata (truncated / analyzed_chars / total_chars) so the UI
+    can warn the citizen that the end of the bill was not read.
+
     Raises:
-        ValueError: If bill text is empty or response can't be parsed.
+        ValueError: If bill text is empty or the response is unusable.
         RuntimeError: If API key is not configured.
-        anthropic.APIError: If the API call fails.
     """
     if not bill_text or not bill_text.strip():
         raise ValueError("Bill text is empty")
 
-    if client is None:
-        client = get_client()
+    total = len(bill_text)
+    truncated = total > config.MAX_BILL_CHARS
+    if truncated:
+        bill_text = bill_text[: config.MAX_BILL_CHARS] + "\n\n[BILL TRUNCATED FOR LENGTH]"
 
-    if len(bill_text) > MAX_SINGLE_PASS_CHARS:
-        bill_text = bill_text[:MAX_SINGLE_PASS_CHARS] + "\n\n[BILL TRUNCATED FOR LENGTH]"
-
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
+    data = llm.call_json(
+        name="analysis",
+        model=config.MODEL,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": ANALYSIS_PROMPT + bill_text}],
+        prompt=ANALYSIS_PROMPT + bill_text,
+        schema=ANALYSIS_SCHEMA,
+        max_tokens=64000,
+        effort=config.MODEL_EFFORT,
+        client=client,
     )
 
-    response_text = "".join(
-        block.text for block in message.content if hasattr(block, "text")
-    ).strip()
-
-    # Strip markdown fences if they snuck in
-    if response_text.startswith("```"):
-        lines = response_text.split("\n")
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        response_text = "\n".join(lines[1:end])
-
-    try:
-        data = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Could not parse response as JSON: {e}\n\nResponse:\n{response_text[:500]}"
-        ) from e
+    metadata = dict(data.get("metadata", {}))
+    metadata.update({
+        "truncated": truncated,
+        "analyzed_chars": min(total, config.MAX_BILL_CHARS),
+        "total_chars": total,
+        "model": config.MODEL,
+    })
+    open_questions = list(data.get("open_questions", []))
+    if truncated:
+        open_questions.insert(0, (
+            f"Only the first {config.MAX_BILL_CHARS:,} of {total:,} characters were analyzed. "
+            "Provisions after that point were NOT reviewed for red flags."
+        ))
 
     return BillAnalysis(
         title=data.get("title", "Untitled bill"),
@@ -187,6 +210,6 @@ def analyze_bill(bill_text: str, client: Anthropic | None = None) -> BillAnalysi
         beneficiaries=data.get("beneficiaries", {"benefits": [], "costs": [], "regulated": []}),
         red_flags=data.get("red_flags", []),
         comparable_laws=data.get("comparable_laws", []),
-        open_questions=data.get("open_questions", []),
-        metadata=data.get("metadata", {}),
+        open_questions=open_questions,
+        metadata=metadata,
     )

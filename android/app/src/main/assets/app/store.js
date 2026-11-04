@@ -23,8 +23,8 @@
 
   var DEFAULT_SETTINGS = {
     apiKey: '',
-    model: 'claude-opus-4-8',          // mirrors backend/config.py MODEL
-    checkerModel: 'claude-haiku-4-5',  // mirrors CHECKER_MODEL (capture defense)
+    model: 'claude-opus-5-5',          // mirrors backend/config.py MODEL
+    checkerModel: 'claude-haiku-5-5',  // mirrors CHECKER_MODEL (capture defense)
     populationSize: 200,
     demoMode: true,                    // zero cooling-off timers, like the demo .bat
     multiModelCheck: true,

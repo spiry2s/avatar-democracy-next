@@ -24,7 +24,7 @@ The goal: make it feasible for ordinary citizens to actually understand legislat
 
 This is the first concrete tool from a broader proposal called **Avatar Democracy** — the idea that the lower legislative chamber of representative democracies could be replaced with AI agents that vote for each citizen, executing their delegated political will.
 
-You can read the full white paper here: [docs/white-paper.md](docs/white-paper.md)
+You can read the full white paper here: [ai_avatar_democracy_v1.0.md](ai_avatar_democracy_v1.0.md)
 
 The bill summary tool exists independently of that vision. It works with current legislatures, current democracy, current institutions. It just makes legislation legible to citizens. If the broader vision never happens, this tool still has value.
 
@@ -63,12 +63,18 @@ Then open [http://localhost:8000](http://localhost:8000) in your browser.
 
 ### Android app
 
-An Android WebView client lives in [`android/`](android/). It connects to the same FastAPI backend rather than bundling the Python server or API key into the APK.
+The Android app in [`android/`](android/) has two modes:
 
-- Emulator backend URL: `http://10.0.2.2:8000`
-- Physical phone: run `Start Avatar Democracy LAN.bat`, then enter the printed `http://YOUR-PC-IP:8000` URL in the app.
+- **Standalone (default):** the APK bundles the web UI plus a JavaScript port of the backend, and calls Claude directly with an API key you enter on the phone. No PC needed.
+- **Remote:** a thin WebView onto this FastAPI server. Run `Start Avatar Democracy LAN.bat` and open the printed `http://YOUR-PC-IP:8000/?token=...` URL in the app. LAN mode always requires an access token.
 
 See [`ANDROID.md`](ANDROID.md) for setup and APK build notes.
+
+### Security notes
+
+- State-changing requests from other origins are refused, so a website you visit can't drive your local server.
+- Binding to a non-loopback address (LAN mode) without `AVATAR_ACCESS_TOKEN` generates a token at startup; every request must present it.
+- Analyze-by-URL only fetches public http/https addresses (no LAN or loopback targets), follows at most 5 redirects, and caps downloads at 25 MB.
 
 ## Example output
 
@@ -104,37 +110,43 @@ WHO LOSES
 
 ## How it works
 
-The tool sends the bill text to Claude with carefully crafted prompts that ask for structured analysis. The prompts are designed to:
+Every model call goes through [`backend/llm.py`](backend/llm.py) and returns schema-validated JSON (structured outputs). Section ids in the vote, cross-check, and chamber schemas are enums of the bill's real section ids, so results from different calls always line up.
+
+The prompts are designed to:
 
 1. Avoid partisan framing
 2. Surface specific concrete provisions, not vague summaries
 3. Flag patterns associated with lobbyist insertions (named entities, narrow exemptions, buried provisions)
 4. Identify who benefits and loses concretely
 
-The prompts are in [`backend/prompts.py`](backend/prompts.py) and are open for critique and improvement. Better prompts produce better analysis.
+The prompts live next to the code that uses them ([`backend/summarizer.py`](backend/summarizer.py), [`backend/avatar.py`](backend/avatar.py), [`backend/chamber.py`](backend/chamber.py)) and are open for critique and improvement.
 
 ## Project structure
 
 ```
 avatar-democracy/
+├── main.py               # FastAPI server (pages + /api/*), access control
 ├── backend/
-│   ├── app.py            # FastAPI web server
-│   ├── analyzer.py       # Bill analysis logic
-│   ├── prompts.py        # All Claude prompts (open for review)
-│   ├── pdf_parser.py     # PDF extraction
-│   └── cli.py            # Command-line interface
-├── frontend/
-│   ├── index.html        # Web UI
-│   ├── style.css         # Styling
-│   └── app.js            # Browser logic
-├── docs/
-│   ├── white-paper.md    # The full Avatar Democracy proposal
-│   └── prompt-design.md  # Why the prompts are written this way
-├── examples/
-│   └── sample-bills/     # Example bills for testing
-└── tests/
-    └── test_analyzer.py  # Tests
+│   ├── llm.py            # Single Claude client: structured outputs, streaming, stop-reason checks
+│   ├── summarizer.py     # Neutral bill analysis + red flags
+│   ├── avatar.py         # Per-citizen Avatar vote, multi-model cross-check, delegate drift
+│   ├── chamber.py        # Proxy Chamber: section axis tags + deterministic population vote
+│   ├── bills.py          # Bill lifecycle state machine and tally
+│   ├── profile.py        # Citizen profile: compass, values, delegates (asymmetric edits)
+│   ├── questionnaire.py  # Compass-seeding questionnaire
+│   ├── population.py     # Synthetic population
+│   ├── conflict.py       # Cross-bill conflict detection
+│   ├── audit.py          # Hash-chained, tamper-evident audit log
+│   ├── storage.py        # Atomic JSON writes, per-key locks, corruption detection
+│   ├── extractors.py     # Text / URL / PDF extraction (SSRF-hardened)
+│   ├── sections.py       # Section-id and name normalization
+│   └── config.py         # Env-overridable settings
+├── frontend/             # Web UI (also bundled unmodified into the Android APK)
+├── android/              # Android app (standalone + remote modes)
+└── tests/                # pytest suite (pure logic + API endpoints with a fake model)
 ```
+
+The white paper drafts are the `ai_avatar_democracy_*.md` / `ai_proxy_democracy_*.md` files in the repo root.
 
 ## Roadmap
 
@@ -146,11 +158,14 @@ This is **alpha**. Current capabilities:
 - ✅ Red-flag detection
 - ✅ Beneficiary analysis
 - ✅ Web interface
-- ✅ CLI tool
+- ✅ Per-citizen Avatar voting with delegates
+- ✅ Proxy Chamber (synthetic population)
+- ✅ Multi-model cross-check and delegate-drift flags
+- ✅ Tamper-evident audit log
 
 Planned:
 
-- Comparison across multiple AI providers (catch single-model bias)
+- Cross-check with a model from a different provider (today's check uses a second Claude model)
 - Historical comparison (how does this bill compare to similar past bills?)
 - Citation tracking (which sections cite which laws?)
 - Lobbying disclosure cross-reference (was this language proposed by registered lobbyists?)
@@ -167,8 +182,6 @@ Contributions are welcome. Particularly valuable:
 - **UI improvements** — make the output more readable and useful
 - **Critique** — we want to know what doesn't work
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
 ## Limitations and honest framing
 
 **This tool is not magic.** Claude can:
@@ -180,7 +193,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 **Always verify against the actual bill text.** This tool is a reading aid, not an oracle.
 
-**This tool reflects one model's analysis.** A future version should run the same bill through multiple models and surface disagreements — that's a much stronger signal than any single model's output.
+**Votes are cross-checked by a second model, but analysis is still one model's view.** Disagreements between models are flagged on each section; a cross-provider check would be a stronger signal.
 
 **Do not use this to make legal decisions.** It's not legal advice. Consult actual lawyers for actual legal matters.
 

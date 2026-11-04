@@ -4,8 +4,9 @@ title Avatar Democracy LAN server
 echo =============================================
 echo    Avatar Democracy LAN server
 echo    Starts on http://0.0.0.0:8000
-echo    Use your PC IPv4 address from the list below
-echo    on Android, e.g. http://192.168.1.50:8000
+echo    Access is protected by a token printed below.
+echo    On your phone open http://YOUR-PC-IP:8000/?token=...
+echo    using an address from the list below.
 echo =============================================
 echo.
 

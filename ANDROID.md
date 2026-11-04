@@ -11,7 +11,7 @@ The APK bundles the full web frontend plus a JavaScript port of the backend. Eve
 - On first launch a settings panel opens automatically — paste your API key there (get one at [console.anthropic.com](https://console.anthropic.com)) and pick models. The gear button (bottom right) reopens it anytime.
 - The key is stored only on the device and sent only to `api.anthropic.com`. No key is baked into the APK.
 
-Settings include: main model (Opus 4.8 default), checker model for the capture-defense cross-check (Haiku 4.5 default), synthetic population size, demo mode (skips cooling-off timers), and a local-data wipe.
+Settings include: main model (Opus 5.5 default), checker model for the capture-defense cross-check (Haiku 5.5 default), synthetic population size, demo mode (skips cooling-off timers), and a local-data wipe.
 
 Standalone limitations (use a PC server for these): PDF upload and analyze-by-URL are not available — paste bill text instead.
 
@@ -51,5 +51,8 @@ The Android SDK location is read from `android/local.properties` (`sdk.dir=...`)
 
 ## Notes
 
+- Android backup is disabled (`allowBackup="false"`) so the API key stored on the device is never copied into device or cloud backups.
+- Remote mode against a LAN server needs the access token the server prints: open `http://YOUR-PC-IP:8000/?token=...`.
+- The JavaScript port in `assets/app/` mirrors the Python backend but has not yet received the Python side's structured-output and section-id fixes; treat the Python server as the reference implementation.
 - Cleartext HTTP is enabled so remote mode can reach a LAN FastAPI server. Standalone mode itself only talks HTTPS to `api.anthropic.com`.
 - For any public deployment of the backend, host it over HTTPS.
