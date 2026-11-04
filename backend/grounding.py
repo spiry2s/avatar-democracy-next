@@ -24,10 +24,12 @@ ANALYSIS_DATA_END = "<<<END_ANALYSIS_DATA>>>"
 # A quote shorter than this is a fragment, not a ground. Length counts an
 # allowlist after NFKC: letters, numbers, punctuation, and symbols.
 # Combining marks, format characters, whitespace, variation selectors, and
-# blank fillers do not count. Runs of the same punctuation or symbol collapse,
-# and at least MIN_QUOTE_ALNUM of the counted characters must be letters or
-# digits. The check runs only after the raw quote is found in the bill, so a
-# short string that is not in the source is still reported as missing.
+# blank fillers do not count. Punctuation whose Unicode name matches *FILLER
+# (including the numbered FILLER-1 form) does not count either. Runs of the
+# same punctuation or symbol collapse, and at least MIN_QUOTE_ALNUM of the
+# counted characters must be letters or digits. The check runs only after the
+# raw quote is found in the bill, so a short string that is not in the source
+# is still reported as missing.
 MIN_QUOTE_CHARS = 40
 MIN_QUOTE_ALNUM = 20
 
@@ -67,7 +69,17 @@ _MATCH_FOLD = {
     "\ufb02": "fl",
     "\ufb03": "ffi",
     "\ufb04": "ffl",
+    # Long s + t is a historical s, so the quote's modern spelling is "st".
+    "\ufb05": "st",
+    "\ufb06": "st",
+    # Dutch digraph. Not a letter in French or Norwegian.
+    "\u0132": "IJ",
+    "\u0133": "ij",
 }
+
+# U+0152 Œ and U+0153 œ are intentionally absent. French treats œ as a letter
+# (cœur, œuvre), and Unicode does not decompose it. Norwegian romanizes ø,
+# a different letter, as "oe". Folding œ to oe would blur both.
 
 TRUNCATION_MARKER = "\n\n[BILL TRUNCATED FOR LENGTH]"
 
@@ -507,22 +519,50 @@ def _is_variation_selector(char: str) -> bool:
     return 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF
 
 
+def _name_tail_is_filler(name: str) -> bool:
+    """True when the last word of a Unicode name matches *FILLER.
+
+    "GAP FILLER" matches. The numbered gap fillers match too: "FILLER-1"
+    and "FILLER-2" do not end in FILLER, but they are the same characters.
+    """
+    tail = name.rsplit(" ", 1)[-1]
+    if tail == "FILLER":
+        return True
+    prefix = "FILLER-"
+    return tail.startswith(prefix) and tail[len(prefix) :].isdigit()
+
+
+def _is_punctuation_filler(char: str) -> bool:
+    """Punctuation that fills a gap rather than contributing text.
+
+    Letters named FILLER are already on the blank list. This is the same
+    name rule for category P: DEVANAGARI GAP FILLER, KAWI PUNCTUATION SPACE
+    FILLER, BHAIKSUKI GAP FILLER-1, and the rest.
+    """
+    if unicodedata.category(char)[:1] != "P":
+        return False
+    name = unicodedata.name(char, "")
+    return bool(name) and _name_tail_is_filler(name)
+
+
 def _counts_toward_quote(char: str) -> bool:
-    """Allowlist: letter, number, punctuation, or symbol, and not a blank filler."""
+    """Allowlist: letter, number, punctuation, or symbol, and not a filler."""
     if char in _BLANK_FILLERS or _is_variation_selector(char):
         return False
-    return unicodedata.category(char)[0] in "LNPS"
+    if unicodedata.category(char)[0] not in "LNPS":
+        return False
+    return not _is_punctuation_filler(char)
 
 
 def visible_text(value: str) -> str:
-    """Characters that count toward the quote floor and the title-in-quote check.
+    """Characters that count toward the quote length floor.
 
     NFKC runs first. Only letters, numbers, punctuation, and symbols remain.
     Combining marks, format characters, and whitespace drop out because they
-    are outside that allowlist. Blank fillers and variation selectors drop
-    even when their category would otherwise count. A run of the same
-    punctuation or symbol character counts once, so dots or underscores
-    cannot pad a short word.
+    are outside that allowlist. Blank fillers, variation selectors, and
+    punctuation whose names match *FILLER drop even when their category
+    would otherwise count. A run of the same punctuation or symbol character
+    counts once, so dots or underscores cannot pad a short word.
     """
     normalized = unicodedata.normalize("NFKC", value)
     kept: list[str] = []
@@ -544,10 +584,16 @@ def quote_meets_minimum(value: str) -> bool:
 
 
 def title_inside_quote(title: str, quote: str) -> bool:
-    """True when the title wording appears inside its quote, after normalization."""
-    normalized_title = visible_text(title).casefold()
-    normalized_quote = visible_text(quote).casefold()
-    return bool(normalized_title) and normalized_title in normalized_quote
+    """True when the title wording appears inside its quote.
+
+    Both sides go through the quote matcher: NFC, then `_MATCH_FOLD`.
+    Case is folded after that, so capitalization alone does not separate a
+    title from the bill's wording. The length floor's NFKC allowlist is not
+    applied here.
+    """
+    normalized_title = fold_for_match(title)[0].casefold()
+    normalized_quote = fold_for_match(quote)[0].casefold()
+    return bool(normalized_title.strip()) and normalized_title in normalized_quote
 
 
 def _quote_candidates(quote: str) -> list[str]:
@@ -595,7 +641,8 @@ def accept_quote(
     ranges actually sent to the model; a hit only in a truncated tail is
     not grounded. A hit that fails the length floor is not grounded either.
     The search folds NFC, curly quotes, dashes, non-breaking spaces, and a
-    few ligatures, then maps the hit back onto the original characters.
+    few ligatures (ff, fi, fl, ffi, ffl, st, and ij). It does not fold œ.
+    A hit is mapped back onto the original characters.
     NFKC is not used for that search.
     """
     claimed_start = start if _is_int(start) else None

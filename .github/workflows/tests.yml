@@ -1,0 +1,37 @@
+# The suite does not call a provider. No secrets are read.
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Absent credential. Tests that need a key set a dummy themselves and
+      # replace the client. Nothing in this job should open a network call.
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        # pytest is in requirements.txt. There is no extra test-requirements file.
+        run: python -m pip install -r requirements.txt
+
+      - name: Print Unicode and Python versions
+        run: python -c "import sys, unicodedata; print(sys.version); print('unicodedata.unidata_version', unicodedata.unidata_version)"
+
+      - name: Run tests
+        run: python -m pytest -q

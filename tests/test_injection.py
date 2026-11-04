@@ -793,6 +793,35 @@ def test_title_wording_must_appear_inside_title_quote(monkeypatch):
     assert "Bill under review" in voter.calls[0]["user"]
 
 
+def test_title_inside_quote_uses_nfc_and_the_match_fold():
+    """The title check folds the same way quote matching does.
+
+    Curly quotes, the em dash, and Ĳ would miss if the title were compared
+    with the length floor's NFKC allowlist alone. Decomposed letters compose
+    under NFC. A different word still fails.
+    """
+    word_nfd = unicodedata.normalize("NFD", "Zażółć")
+    word_nfc = unicodedata.normalize("NFC", "Zażółć")
+    assert word_nfd != word_nfc
+    title = f"The \u201c{word_nfd} Subsidy\u201d Act \u2014 \u0132sselmeer"
+    quote = f'The "{word_nfc} Subsidy" Act - IJsselmeer shall publish recipients yearly.'
+    assert grounding.quote_meets_minimum(quote)
+    assert grounding.title_inside_quote(title, quote) is True
+    assert grounding.title_inside_quote(title.casefold(), quote) is True
+    assert grounding.title_inside_quote(title.replace("Subsidy", "Secrecy"), quote) is False
+    # œ is not a fold, so a French ligature does not hide inside "oe".
+    assert grounding.title_inside_quote("cœur disclosure", "The coeur disclosure act shall publish recipients.") is False
+
+    bill = _section_bill(quote)
+    body = _payload(quote)
+    body["title"] = title
+    body["title_quote"] = quote
+    result = summarizer.analyze_bill(bill, provider=FakeProvider([json.dumps(body)]))
+    assert result.sections[0]["grounded"] is True
+    assert result.title_grounded is True
+    assert result.title_grounding_reason == "exact"
+
+
 @pytest.mark.parametrize(
     "pad",
     [
@@ -902,6 +931,54 @@ def test_ligature_in_the_bill_matches_plain_letters_in_the_quote():
     assert bill[result.sections[0]["quote_start"]:result.sections[0]["quote_end"]] == sentence
 
 
+def test_st_and_ij_ligatures_fold_and_oe_does_not():
+    """ﬅ and ﬆ fold to st, Ĳ and ĳ to IJ and ij. Œ and œ do not fold.
+
+    œ is a French letter, and Unicode does not decompose it. Norwegian
+    romanizes ø, a different letter, as oe. Folding œ to oe would blur both.
+    """
+    assert grounding._MATCH_FOLD["\ufb05"] == "st"
+    assert grounding._MATCH_FOLD["\ufb06"] == "st"
+    assert grounding._MATCH_FOLD["\u0132"] == "IJ"
+    assert grounding._MATCH_FOLD["\u0133"] == "ij"
+    assert "\u0152" not in grounding._MATCH_FOLD
+    assert "\u0153" not in grounding._MATCH_FOLD
+
+    sentence = "The be\ufb05 \ufb06ory of the \u0132sselmeer and the \u0133ssel shall publish recipients."
+    quote = (
+        sentence.replace("\ufb05", "st")
+        .replace("\ufb06", "st")
+        .replace("\u0132", "IJ")
+        .replace("\u0133", "ij")
+    )
+    assert "best story" in quote and "IJsselmeer" in quote and "ijssel" in quote
+    assert grounding.quote_meets_minimum(quote)
+    bill = _section_bill(sentence)
+    result = summarizer.analyze_bill(bill, provider=FakeProvider([json.dumps(_payload(quote))]))
+    assert result.sections[0]["grounded"] is True
+    assert bill[result.sections[0]["quote_start"]:result.sections[0]["quote_end"]] == sentence
+
+    french = "The cœur of this act shall publish subsidy recipients each year."
+    expanded = french.replace("\u0153", "oe")
+    assert "coeur" in expanded and grounding.fold_for_match(french)[0] == french
+    french_bill = _section_bill(french)
+    missed = summarizer.analyze_bill(
+        french_bill, provider=FakeProvider([json.dumps(_payload(expanded))])
+    )
+    assert missed.sections[0]["grounded"] is False
+    assert missed.sections[0]["grounding_reason"] == "quote_not_in_source"
+
+    norwegian = "Øystein skal publisere støttemottakere i denne loven hvert år."
+    assert grounding.fold_for_match(norwegian)[0] == norwegian
+    romanized = norwegian.replace("Ø", "Oe").replace("ø", "oe")
+    norwegian_bill = _section_bill(norwegian)
+    still_missing = summarizer.analyze_bill(
+        norwegian_bill, provider=FakeProvider([json.dumps(_payload(romanized))])
+    )
+    assert still_missing.sections[0]["grounded"] is False
+    assert still_missing.sections[0]["grounding_reason"] == "quote_not_in_source"
+
+
 def test_curly_quotes_dashes_and_nbsp_match_their_plain_forms():
     inner = "The Secretary shall publish subsidy recipients"
     curly = "\u201c" + inner + "\u201d"
@@ -967,6 +1044,63 @@ def test_folded_match_respects_section_and_truncated_tail(monkeypatch):
     assert tail.sections[0]["grounding_reason"] == "quote_outside_analyzed_text"
 
 
+# Versions this suite has been checked against. Anything newer still has to
+# pass the full-code-point sweep below. Anything older can omit characters
+# that sweep is there to catch (Kawi punctuation, added in Unicode 15.0).
+# Python 3.12 ships 15.0.0. CI's Python 3.13 ships 15.1.0.
+_KNOWN_UNIDATA_VERSIONS = ((15, 0, 0), (15, 1, 0))
+
+
+def _unidata_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def test_unicode_version_is_known_or_newer():
+    """The full-Unicode sweep below runs on a database this suite knows.
+
+    An older unicodedata would skip code points the sweep is meant to see,
+    and the job would still look green. CI prints the same version.
+    """
+    version = unicodedata.unidata_version
+    parsed = _unidata_tuple(version)
+    assert parsed in _KNOWN_UNIDATA_VERSIONS or any(
+        parsed > known for known in _KNOWN_UNIDATA_VERSIONS
+    ), version
+
+
+def _punctuation_filler_name(name: str) -> bool:
+    """Independent of grounding: the last word is FILLER or FILLER-<digits>."""
+    tail = name.rsplit(" ", 1)[-1]
+    return tail == "FILLER" or (tail.startswith("FILLER-") and tail[7:].isdigit())
+
+
+def test_punctuation_fillers_do_not_count_toward_quote_length():
+    """Category-P characters named *FILLER cannot pad a short quote.
+
+    The numbered forms (BHAIKSUKI GAP FILLER-1 and FILLER-2) are included.
+    Letters named FILLER are a separate blank list.
+    """
+    found: list[tuple[int, str]] = []
+    for code in range(sys.maxunicode + 1):
+        char = chr(code)
+        if not unicodedata.category(char).startswith("P"):
+            continue
+        name = unicodedata.name(char, "")
+        if name and _punctuation_filler_name(name):
+            found.append((code, name))
+            assert grounding.visible_text(char) == ""
+            assert grounding._counts_toward_quote(char) is False
+    names = {name for _, name in found}
+    assert "DEVANAGARI GAP FILLER" in names
+    assert "BHAIKSUKI GAP FILLER-1" in names
+    assert "BHAIKSUKI GAP FILLER-2" in names
+    assert "KAWI PUNCTUATION SPACE FILLER" in names
+    padded = "shall" + "".join(chr(code) for code, _name in found) * 6
+    assert len(padded) >= grounding.MIN_QUOTE_CHARS
+    assert grounding.visible_text(padded) == "shall"
+    assert not grounding.quote_meets_minimum(padded)
+
+
 # Unicode 15.0 Default_Ignorable_Code_Point ranges. Python's unicodedata does
 # not expose the property. Category Cf and variation selectors are added at
 # runtime so a newer database still flags new format characters.
@@ -1023,8 +1157,9 @@ def test_counted_characters_are_not_invisible_or_known_blanks():
     """Every code point that adds to the length floor must be visible.
 
     Default_Ignorable_Code_Point is the Unicode property. The known-blank
-    list also catches letters that draw nothing, such as U+13441. A future
-    Unicode database that adds another such character fails this test.
+    list also catches letters that draw nothing, such as U+13441, and
+    punctuation whose names match *FILLER. A future Unicode database that
+    adds another such character fails this test.
     """
     ignorable = _default_ignorable_bits()
     counted_invisible: list[str] = []
@@ -1033,9 +1168,14 @@ def test_counted_characters_are_not_invisible_or_known_blanks():
         if not grounding.visible_text(char):
             continue
         name = unicodedata.name(char, "")
-        known_blank = code in _KNOWN_BLANKS or (
+        category = unicodedata.category(char)
+        tail = name.rsplit(" ", 1)[-1] if name else ""
+        punctuation_filler = category.startswith("P") and (
+            tail == "FILLER" or (tail.startswith("FILLER-") and tail[7:].isdigit())
+        )
+        known_blank = punctuation_filler or code in _KNOWN_BLANKS or (
             bool(name)
-            and unicodedata.category(char).startswith("L")
+            and category.startswith("L")
             and (name.endswith(" BLANK") or name.endswith(" FILLER"))
         )
         if ignorable[code] or known_blank:
