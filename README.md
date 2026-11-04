@@ -167,12 +167,7 @@ avatar-democracy/
 ├── ai_proxy_democracy_v0.1.md
 ├── ai_proxy_democracy_v0.2.md
 ├── ai_proxy_democracy_v0.3.md
-├── ai_proxy_democracy_v0.4.md
-├── analyzer.py                  # Earlier analyzer draft. main.py does not import it.
-├── summarizer.py                # Earlier summarizer draft. main.py does not import it.
-├── prompts.py                   # Prompts for that draft. main.py does not import it.
-├── index.html                   # Earlier page. The server serves frontend/index.html.
-└── app.js                       # Earlier script. The server serves frontend/app.js.
+└── ai_proxy_democracy_v0.4.md
 ```
 
 The prompts the running app sends are the constants in `backend/summarizer.py`, `backend/avatar.py`, `backend/chamber.py`, and `backend/conflict.py`. The vendor SDK is only constructed in `backend/llm.py`.
