@@ -1,198 +1,193 @@
-# Avatar Democracy — Bill Summary Tool
+# Avatar Democracy
 
-> Plain-language summaries and red-flag detection for legislation. The first concrete tool of a broader proposal for AI-mediated direct democracy.
+Local prototype of an AI-mediated legislative process: plain-language bill analysis, one citizen Avatar, a bill lifecycle, and a synthetic Proxy Chamber.
+
+The proposal is written up in [ai_avatar_democracy_v1.0.md](ai_avatar_democracy_v1.0.md) (rendered copy: [ai_avatar_democracy_v1.0.html](ai_avatar_democracy_v1.0.html)). Earlier drafts are `ai_proxy_democracy_v0.1.md` through `ai_proxy_democracy_v0.4.md`.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#)
 
----
+## What runs
 
-## What this is
+`python main.py` starts a FastAPI app. It serves the pages in `frontend/` and the API defined in `main.py`. Default address: [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-A working tool that takes legislative bills (text or PDF), produces:
+| Page | What it does |
+| --- | --- |
+| `/` | Landing page |
+| `/analyze` | Bill summary and red-flag analysis from pasted text, a URL, or a PDF |
+| `/avatar` | Compass questionnaire, values statement, per-issue delegates, recorded positions |
+| `/vote` | Analyze a bill, then cast the Avatar's per-section vote. Overrides update the page and the audit log |
+| `/bills` | Draft, version, endorse, cool off, then a per-section chamber vote |
+| `/chamber` | Synthetic population used as the Proxy Chamber |
+| `/history` | Append-only audit log |
 
-- **Plain-language summary** of what the bill actually does
-- **Section-by-section breakdown** so nothing is buried
-- **Red-flag detection** — provisions that look like lobbyist insertions, hidden giveaways, or buried problematic language
-- **Beneficiary analysis** — who gains, who loses
-- **Constitutional and legal concerns** if any
+Bill analysis, the operator's Avatar vote, and chamber axis-tagging call Anthropic with `AVATAR_MODEL` (default `claude-sonnet-4-6`). A second Anthropic model, `CHECKER_MODEL` (default `claude-haiku-4-5`), can cross-check that vote, compare a grounded delegate's vote with their recorded positions, and flag conflicts with bills that already passed. The synthetic chamber then votes from compass alignment, with no further model call per citizen.
 
-The goal: make it feasible for ordinary citizens to actually understand legislation, instead of relying on partisan spin or trusting that someone else has read it.
+Those model calls need `ANTHROPIC_API_KEY`. Pages, the profile, the bill state machine, the population, and the audit log run without a key. `GET /api/health` reports whether the key is set. `POST /api/analyze` returns HTTP 500 with an explicit message when the key is missing.
 
-## Why this exists
+## Setup
 
-This is the first concrete tool from a broader proposal called **Avatar Democracy** — the idea that the lower legislative chamber of representative democracies could be replaced with AI agents that vote for each citizen, executing their delegated political will.
-
-You can read the full white paper here: [docs/white-paper.md](docs/white-paper.md)
-
-The bill summary tool exists independently of that vision. It works with current legislatures, current democracy, current institutions. It just makes legislation legible to citizens. If the broader vision never happens, this tool still has value.
-
-If the broader vision does happen, this becomes part of the audit infrastructure described in the white paper (Design Decision #19: "Independent competing AI summary services with red-flag detection for hidden provisions").
-
-## Quick start
-
-### Prerequisites
-
-- Python 3.10 or higher
-- An Anthropic API key — get one at [console.anthropic.com](https://console.anthropic.com)
-
-### Installation
+Python 3.10 or newer.
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/avatar-democracy.git
+git clone https://github.com/spiry2s/avatar-democracy.git
 cd avatar-democracy
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
 ```
 
-### Configuration
+On Windows, activate with `.venv\Scripts\activate`.
 
-Create a `.env` file in the project root:
+Edit `.env` and set a real key. Create one at [console.anthropic.com](https://console.anthropic.com).
 
 ```
-ANTHROPIC_API_KEY=your_key_here
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### Run the web interface
+`requirements.txt` already includes the runtime stack (FastAPI, Uvicorn, Anthropic SDK, httpx, pypdf, BeautifulSoup, python-dotenv) and pytest.
+
+## Run the app
+
+From the repository root:
 
 ```bash
-cd backend
-python app.py
+python main.py
 ```
 
-Then open [http://localhost:8000](http://localhost:8000) in your browser.
-
-### Run from the command line
+The same app can be started with Uvicorn directly:
 
 ```bash
-python backend/cli.py path/to/bill.pdf
-python backend/cli.py path/to/bill.txt --output summary.json
+uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-## Example output
+`Start Avatar Democracy.bat` starts `python main.py` on Windows and sets the cooling-off timers to `0`, so a new delegate and a frozen bill can advance immediately.
 
-For a bill about agricultural subsidies, the tool produces something like:
+`HOST` defaults to `127.0.0.1`. `PORT` defaults to `8000`.
+
+`sample_bill.txt` is a short fictional bill you can paste on `/analyze`. Analysis and voting stay unavailable until `ANTHROPIC_API_KEY` is set.
+
+For a click-through of the bill lifecycle without waiting out the default week-long timers:
 
 ```
-SUMMARY
-This bill reauthorizes the Farm Bill for 5 years with $428B in spending.
-Major provisions cover crop insurance, conservation programs, SNAP funding,
-and rural development.
-
-KEY SECTIONS
-1. Title I — Commodities ($63B): expands crop insurance subsidies...
-2. Title II — Conservation ($60B): continues CRP at current levels...
-[...]
-
-RED FLAGS DETECTED
-⚠ Section 12047(c)(ii): exempts a single corporation by name from
-  reporting requirements — appears to be lobbyist insertion
-⚠ Section 8801: $2.3B sugar subsidy concentrated to 4,000 producers
-⚠ Buried in Title VII: removes country-of-origin labeling for beef
-
-WHO BENEFITS
-- Large commodity producers (top 10% receive 70% of subsidies)
-- Specific named corporations exempted in Section 12047
-- Sugar industry (concentrated benefit)
-
-WHO LOSES
-- Small farmers (no targeted support added)
-- Consumers (labeling removal reduces transparency)
-- Conservation programs (real-dollar cuts due to inflation)
+BILL_COOLING_OFF_SECONDS=0
+DELEGATE_COOLING_OFF_SECONDS=0
+EMERGENCY_COOLING_OFF_SECONDS=0
 ```
 
-## How it works
+The process writes runtime state under `data/` (gitignored): `profile.json`, one JSON file per bill, `audit.jsonl`, and `population.json`.
 
-The tool sends the bill text to Claude with carefully crafted prompts that ask for structured analysis. The prompts are designed to:
+## Run the tests
 
-1. Avoid partisan framing
-2. Surface specific concrete provisions, not vague summaries
-3. Flag patterns associated with lobbyist insertions (named entities, narrow exemptions, buried provisions)
-4. Identify who benefits and loses concretely
+From the repository root. No API key and no network:
 
-The prompts are in [`backend/prompts.py`](backend/prompts.py) and are open for critique and improvement. Better prompts produce better analysis.
+```bash
+python -m pytest
+```
+
+The tests cover bill lifecycle transitions, chamber tallies, population distribution, multi-model divergence matching, delegate grounding, and which sections are eligible for a drift check. They exercise that logic directly and never call Anthropic.
+
+## Configuration
+
+Optional. Defaults live in `backend/config.py` and `backend/profile.py`. Copy `.env.example` and uncomment a line to override it.
+
+| Variable | Default | Role |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | unset | Required for analysis, Avatar votes, axis tagging, drift checks, and conflict checks |
+| `AVATAR_MODEL` | `claude-sonnet-4-6` | Primary Anthropic model |
+| `CHECKER_MODEL` | `claude-haiku-4-5` | Second Anthropic model for divergence, drift, and cross-bill conflict |
+| `MULTI_MODEL_CHECK` | `1` | `0` skips the second-model vote check |
+| `DELEGATE_DRIFT_CHECK` | `1` | `0` skips drift checks |
+| `CROSS_BILL_CONFLICT_CHECK` | `1` | `0` skips conflict checks on freeze |
+| `POPULATION_SIZE` | `200` | Synthetic chamber size |
+| `BILL_COOLING_OFF_SECONDS` | `604800` (7 days) | Wait between draft freeze and voting |
+| `EMERGENCY_COOLING_OFF_SECONDS` | `3600` | Cooling-off for an emergency bill |
+| `DELEGATE_COOLING_OFF_SECONDS` | `604800` (7 days) | Wait before a new delegate is followed. Revocation is immediate |
+| `ENDORSE_THRESHOLD_ORDINARY` | `25` | Demo-scaled. The white paper sketches about 50,000 for a US-sized population |
+| `ENDORSE_THRESHOLD_MAJOR` | `250` | Demo-scaled |
+| `ENDORSE_THRESHOLD_CONSTITUTIONAL` | `2500` | Demo-scaled |
+| `EMERGENCY_THRESHOLD_MULTIPLIER` | `2` | Emergency bills need a higher endorsement bar |
+| `ENDORSEMENT_REVOCATION_SECONDS` | `86400` | Window during which an endorsement can be revoked |
+| `SECTION_PASSAGE_RATIO` | `0.5` | `yes / (yes + no)` required for a contested section |
+| `CHAMBER_VOTE_TAU` | `0.12` | Compass alignment below this abstains |
+| `HOST` | `127.0.0.1` | Bind address |
+| `PORT` | `8000` | Bind port |
+
+`MULTI_MODEL_CHECK`, `DELEGATE_DRIFT_CHECK`, and `CROSS_BILL_CONFLICT_CHECK` turn off when set to `0`, `false`, or an empty string.
 
 ## Project structure
 
 ```
 avatar-democracy/
+├── main.py                      # FastAPI app. This is the entry point.
+├── requirements.txt
+├── .env.example
+├── sample_bill.txt              # Short fictional bill for /analyze
+├── Start Avatar Democracy.bat   # Windows launcher; cooling-off timers set to 0
 ├── backend/
-│   ├── app.py            # FastAPI web server
-│   ├── analyzer.py       # Bill analysis logic
-│   ├── prompts.py        # All Claude prompts (open for review)
-│   ├── pdf_parser.py     # PDF extraction
-│   └── cli.py            # Command-line interface
-├── frontend/
-│   ├── index.html        # Web UI
-│   ├── style.css         # Styling
-│   └── app.js            # Browser logic
-├── docs/
-│   ├── white-paper.md    # The full Avatar Democracy proposal
-│   └── prompt-design.md  # Why the prompts are written this way
-├── examples/
-│   └── sample-bills/     # Example bills for testing
-└── tests/
-    └── test_analyzer.py  # Tests
+│   ├── summarizer.py            # Bill-analysis prompt and Anthropic call
+│   ├── extractors.py            # Pasted text, URL (HTML or PDF), uploaded PDF
+│   ├── avatar.py                # Avatar vote, second-model divergence, drift check
+│   ├── profile.py               # Compass, values, delegates, recorded positions
+│   ├── questionnaire.py         # Six-axis seeding questionnaire
+│   ├── bills.py                 # Draft, endorse, cool off, vote, pass or fail
+│   ├── chamber.py               # Axis tags and deterministic population votes
+│   ├── population.py            # Synthetic citizens
+│   ├── conflict.py              # Cross-bill conflict check
+│   ├── audit.py                 # Append-only JSONL log
+│   └── config.py                # Environment-backed settings
+├── frontend/                    # Pages and scripts served by main.py
+│   ├── index.html
+│   ├── analyze.html
+│   ├── avatar.html
+│   ├── vote.html
+│   ├── bills.html
+│   ├── chamber.html
+│   ├── history.html
+│   ├── style.css
+│   ├── app.js
+│   ├── avatar.js
+│   ├── vote.js
+│   ├── bills.js
+│   ├── chamber.js
+│   └── history.js
+├── tests/
+│   ├── test_bills.py
+│   ├── test_chamber.py
+│   ├── test_divergence.py
+│   ├── test_drift.py
+│   └── test_grounding.py
+├── ai_avatar_democracy_v1.0.md  # White paper
+├── ai_avatar_democracy_v1.0.html
+├── ai_proxy_democracy_v0.1.md
+├── ai_proxy_democracy_v0.2.md
+├── ai_proxy_democracy_v0.3.md
+├── ai_proxy_democracy_v0.4.md
+├── analyzer.py                  # Earlier analyzer draft. main.py does not import it.
+├── summarizer.py                # Earlier summarizer draft. main.py does not import it.
+├── prompts.py                   # Prompts for that draft. main.py does not import it.
+├── index.html                   # Earlier page. The server serves frontend/index.html.
+└── app.js                       # Earlier script. The server serves frontend/app.js.
 ```
 
-## Roadmap
+The prompts the running app sends to Claude are the constants in `backend/summarizer.py` and `backend/avatar.py`.
 
-This is **alpha**. Current capabilities:
+## What the prototype implements
 
-- ✅ Text and PDF input
-- ✅ Plain-language summaries
-- ✅ Section breakdown
-- ✅ Red-flag detection
-- ✅ Beneficiary analysis
-- ✅ Web interface
-- ✅ CLI tool
+- Text extraction from a paste, a URL, or a PDF, then one Claude call that returns JSON: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions.
+- One local citizen profile: a six-axis compass from twelve Likert questions, a free-text values statement, and per-issue delegates. Adding a delegate waits out a cooling-off period before the Avatar follows it. Revoking a delegate is immediate. A delegate can carry recorded positions, which the vote prompt is told to cite.
+- A per-section Avatar vote. The prompt's order is delegate, then values, then compass, otherwise abstain. When `MULTI_MODEL_CHECK` is on, a second Claude model flags sections where its position differs. When `DELEGATE_DRIFT_CHECK` is on, sections attributed to a grounded delegate can be flagged against that delegate's recorded text.
+- A bill path of draft, new versions while still a draft, open for endorsement, freeze once a threshold is met, cooling-off, then voting. An emergency bill uses a higher threshold and a shorter cooling-off. On freeze the server can ask Claude whether the bill conflicts with bills already marked passed.
+- A chamber tally of the operator's Avatar plus a synthetic population. One model tags each section on six axes. Each synthetic citizen votes by compass alignment. A section where everyone abstains does not by itself defeat the bill. Every contested section has to pass.
+- An append-only log of profile edits, endorsements, votes, and overrides in `data/audit.jsonl`.
 
-Planned:
+Endorsements beyond the local operator are a demo counter on the bill (`simulated endorsements` in the Bills UI). The stored result of a chamber vote is the tally from the vote request. A later override on `/vote` is recorded in the audit log and shown on that page.
 
-- Comparison across multiple AI providers (catch single-model bias)
-- Historical comparison (how does this bill compare to similar past bills?)
-- Citation tracking (which sections cite which laws?)
-- Lobbying disclosure cross-reference (was this language proposed by registered lobbyists?)
-- Multi-language support
-- Self-hosted model option (no Anthropic API required)
+## Limits
 
-## Contributing
-
-Contributions are welcome. Particularly valuable:
-
-- **Better prompts** — if you can produce more accurate, less biased analysis with different prompts, please submit them
-- **Real-world bill testing** — try the tool on actual legislation from your country and report failure modes
-- **Translation** — bills exist in many languages
-- **UI improvements** — make the output more readable and useful
-- **Critique** — we want to know what doesn't work
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Limitations and honest framing
-
-**This tool is not magic.** Claude can:
-
-- Misunderstand technical legal language
-- Miss truly subtle provisions
-- Reflect biases from its training data
-- Hallucinate provisions that aren't there
-
-**Always verify against the actual bill text.** This tool is a reading aid, not an oracle.
-
-**This tool reflects one model's analysis.** A future version should run the same bill through multiple models and surface disagreements — that's a much stronger signal than any single model's output.
-
-**Do not use this to make legal decisions.** It's not legal advice. Consult actual lawyers for actual legal matters.
+The model can misread legal language, miss a provision, or describe one that is not in the text. Check the bill. The analysis and the checker are both Anthropic models, so disagreement between them is a weak signal for vendor-level or training-data bias. The chamber is a sample of synthetic compasses, not a population of configured Avatars. This is a local single-user demo. It is not legal advice.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
-
-## Acknowledgments
-
-This project emerged from a long-form dialogue between a human (Filip) and Claude (Anthropic) exploring whether AI Avatar Democracy could be a workable reform for representative government. The white paper documents that conversation. The bill summary tool is the first piece we're building.
-
-If this work is useful to you, the most valuable contribution you can make is a thoughtful critique. We'd rather find out what's broken than have something polished but wrong.
-
----
-
-**Status:** alpha — works, but expect rough edges. Issues and PRs welcome.
+MIT. See [LICENSE](LICENSE).
