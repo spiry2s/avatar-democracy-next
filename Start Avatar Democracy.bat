@@ -17,7 +17,8 @@ set "EMERGENCY_COOLING_OFF_SECONDS=0"
 REM Open the browser a few seconds after the server comes up.
 start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 3; Start-Process 'http://127.0.0.1:8000'"
 
-python main.py
+REM Use the py launcher: plain "python" can resolve to an unrelated venv on PATH.
+py -3 main.py
 
 echo.
 echo Server stopped.

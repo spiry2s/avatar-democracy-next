@@ -236,7 +236,8 @@ def cast_vote(
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=8000,
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
     )

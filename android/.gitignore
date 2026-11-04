@@ -1,0 +1,11 @@
+# Gradle build state and outputs
+.gradle/
+build/
+app/build/
+
+# Machine-local SDK path — each machine writes its own (Android Studio regenerates it)
+local.properties
+
+# IDE state
+.idea/
+*.iml

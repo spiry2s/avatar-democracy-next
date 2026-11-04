@@ -1,0 +1,25 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.spiry2s.avatardemocracy"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.spiry2s.avatardemocracy"
+        minSdk 23
+        targetSdk 35
+        versionCode 2
+        versionName "0.2.0"
+    }
+
+    // Bundle the web frontend into APK assets unmodified; the standalone-mode
+    // scripts live in src/main/assets/app/. MainActivity serves both and injects
+    // the script tags, so frontend/ stays the single source of truth.
+    sourceSets {
+        main {
+            assets.srcDirs = ['src/main/assets', '../../frontend']
+        }
+    }
+}

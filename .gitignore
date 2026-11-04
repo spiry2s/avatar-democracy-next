@@ -22,6 +22,10 @@ Thumbs.db
 # Build artifacts / prior exports
 *.zip
 *.tar.gz
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
 
 # Scratch
 _*.py

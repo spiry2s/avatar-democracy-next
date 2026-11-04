@@ -40,7 +40,7 @@ If the broader vision does happen, this becomes part of the audit infrastructure
 ### Installation
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/avatar-democracy.git
+git clone https://github.com/spiry2s/avatar-democracy.git
 cd avatar-democracy
 pip install -r requirements.txt
 ```
@@ -56,18 +56,19 @@ ANTHROPIC_API_KEY=your_key_here
 ### Run the web interface
 
 ```bash
-cd backend
-python app.py
+python main.py
 ```
 
 Then open [http://localhost:8000](http://localhost:8000) in your browser.
 
-### Run from the command line
+### Android app
 
-```bash
-python backend/cli.py path/to/bill.pdf
-python backend/cli.py path/to/bill.txt --output summary.json
-```
+An Android WebView client lives in [`android/`](android/). It connects to the same FastAPI backend rather than bundling the Python server or API key into the APK.
+
+- Emulator backend URL: `http://10.0.2.2:8000`
+- Physical phone: run `Start Avatar Democracy LAN.bat`, then enter the printed `http://YOUR-PC-IP:8000` URL in the app.
+
+See [`ANDROID.md`](ANDROID.md) for setup and APK build notes.
 
 ## Example output
 

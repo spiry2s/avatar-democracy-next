@@ -157,7 +157,8 @@ def analyze_bill(bill_text: str, client: Anthropic | None = None) -> BillAnalysi
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=8000,
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": ANALYSIS_PROMPT + bill_text}],
     )

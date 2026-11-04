@@ -3,14 +3,20 @@
   "configurations": [
     {
       "name": "avatar-democracy",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["main.py"],
+      "runtimeExecutable": "py",
+      "runtimeArgs": ["-3", "main.py"],
       "port": 8000,
       "env": {
         "BILL_COOLING_OFF_SECONDS": "0",
         "DELEGATE_COOLING_OFF_SECONDS": "0",
         "EMERGENCY_COOLING_OFF_SECONDS": "0"
       }
+    },
+    {
+      "name": "standalone-bundle",
+      "runtimeExecutable": "py",
+      "runtimeArgs": ["-3", "android/dev_server.py"],
+      "port": 8123
     }
   ]
 }

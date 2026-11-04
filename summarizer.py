@@ -25,10 +25,10 @@ from typing import Any
 
 from anthropic import Anthropic
 
-# Model selection. Sonnet is the right balance of capability and cost for this task.
-# Opus would produce slightly better output at significantly higher cost.
+# Model selection. Opus is the quality-critical choice for red-flag detection,
+# and since the 4.5 generation costs ~1.7x Sonnet rather than the old 5x premium.
 # Haiku would be cheaper but miss subtle red flags.
-MODEL = "claude-sonnet-4-5"
+MODEL = "claude-opus-4-8"
 
 # Maximum bill length we'll process in a single pass. Larger bills get chunked.
 MAX_SINGLE_PASS_CHARS = 200_000

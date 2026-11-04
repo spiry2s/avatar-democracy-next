@@ -30,7 +30,11 @@ def _float_env(name: str, default: float) -> float:
 
 
 # Model used for both the neutral analyzer and the Avatar voting engine.
-MODEL = os.environ.get("AVATAR_MODEL", "claude-sonnet-4-6")
+# Opus-tier: red-flag detection and value-grounded voting are the quality-critical
+# path, and Opus now costs ~1.7x Sonnet ($5/$25 vs $3/$15 per MTok), not the old
+# 5x premium. Override with AVATAR_MODEL=claude-sonnet-4-6 for cheaper runs or
+# claude-fable-5 for the premium tier (both also support adaptive thinking).
+MODEL = os.environ.get("AVATAR_MODEL", "claude-opus-4-8")
 
 # Endorsement thresholds by bill scope (white paper decision 8).
 # Real numbers for a US-sized population: ~50,000 ordinary, ~500,000 major,

@@ -142,7 +142,8 @@ def tag_sections(analysis: dict[str, Any], client: Anthropic | None = None) -> d
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=2000,
+        max_tokens=8000,
+        thinking={"type": "adaptive"},
         messages=[{"role": "user", "content": _tag_prompt(analysis)}],
     )
     text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
