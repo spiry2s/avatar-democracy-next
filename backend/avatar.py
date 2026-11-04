@@ -17,16 +17,12 @@ decides how the citizen would want to vote.
 
 from __future__ import annotations
 
-import json
-import os
 import re
 from dataclasses import dataclass, asdict
 from typing import Any
 
-from anthropic import Anthropic
-
-from backend import questionnaire
-from backend.config import MODEL, CHECKER_MODEL, MULTI_MODEL_CHECK, DELEGATE_DRIFT_CHECK
+from backend import llm, questionnaire
+from backend.config import MULTI_MODEL_CHECK, DELEGATE_DRIFT_CHECK
 from backend.profile import CitizenProfile
 
 
@@ -196,20 +192,11 @@ Cast this citizen's vote on each section. Output ONLY this JSON object:
 """
 
 
-def get_client() -> Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY environment variable not set. "
-            "Get a key at https://console.anthropic.com"
-        )
-    return Anthropic(api_key=api_key)
-
-
 def cast_vote(
     analysis: dict[str, Any],
     profile: CitizenProfile,
-    client: Anthropic | None = None,
+    provider: llm.LLMProvider | None = None,
+    checker: llm.LLMProvider | None = None,
 ) -> AvatarVote:
     """
     Cast the citizen's Avatar vote on a bill.
@@ -217,14 +204,15 @@ def cast_vote(
     Args:
         analysis: a bill analysis dict (as produced by summarizer.BillAnalysis.to_dict()).
         profile: the citizen's configuration.
-        client: optional pre-configured Anthropic client.
+        provider: optional primary-role provider. Defaults to the configured one.
+        checker: optional checker-role provider, used for the multi-model and
+            drift checks. Defaults to the configured checker.
 
     Raises:
         ValueError: if the response can't be parsed.
-        RuntimeError: if the API key is not configured.
+        RuntimeError: if the provider is not configured (LLMConfigError).
     """
-    if client is None:
-        client = get_client()
+    provider = llm.resolve(provider, "primary")
 
     prompt = (
         _build_config_block(profile)
@@ -234,28 +222,12 @@ def cast_vote(
         + VOTE_INSTRUCTIONS
     )
 
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=8000,
+    data = provider.complete_json(
+        user=prompt,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        max_tokens=8000,
+        error_prefix="Could not parse Avatar response as JSON",
     )
-
-    response_text = "".join(
-        block.text for block in message.content if hasattr(block, "text")
-    ).strip()
-
-    if response_text.startswith("```"):
-        lines = response_text.split("\n")
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        response_text = "\n".join(lines[1:end])
-
-    try:
-        data = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Could not parse Avatar response as JSON: {e}\n\nResponse:\n{response_text[:500]}"
-        ) from e
 
     section_votes = [
         SectionVote(
@@ -273,9 +245,9 @@ def cast_vote(
     # failure must never break the primary vote.
     if MULTI_MODEL_CHECK and section_votes:
         try:
-            checker = cross_check(analysis, profile, client)
+            checker_positions = cross_check(analysis, profile, checker)
             primary = {sv.section_id: sv.position for sv in section_votes}
-            diverged = find_divergences(primary, checker)
+            diverged = find_divergences(primary, checker_positions)
             for sv in section_votes:
                 if sv.section_id in diverged:
                     sv.divergent = True
@@ -291,7 +263,7 @@ def cast_vote(
                 {"section_id": sv.section_id, "basis": sv.basis, "position": sv.position}
                 for sv in section_votes
             ]
-            drifted = detect_drift(profile, analysis, section_dicts, client)
+            drifted = detect_drift(profile, analysis, section_dicts, checker)
             for sv in section_votes:
                 if sv.section_id in drifted:
                     sv.delegate_drift = True
@@ -321,12 +293,11 @@ No prose, no markdown fences.
 def cross_check(
     analysis: dict[str, Any],
     profile: CitizenProfile,
-    client: Anthropic | None = None,
+    provider: llm.LLMProvider | None = None,
 ) -> dict[str, str]:
     """Run a second, independent model over the same vote and return its per-section
     positions {section_id: position}. Used to flag divergence; never authoritative."""
-    if client is None:
-        client = get_client()
+    provider = llm.resolve(provider, "checker")
 
     prompt = (
         _build_config_block(profile)
@@ -335,19 +306,12 @@ def cross_check(
         + "\n\n---\n"
         + CHECK_INSTRUCTIONS
     )
-    message = client.messages.create(
-        model=CHECKER_MODEL,
-        max_tokens=2000,
+    data = provider.complete_json(
+        user=prompt,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        max_tokens=2000,
+        error_prefix="Could not parse checker response as JSON",
     )
-    text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        text = "\n".join(lines[1:end])
-
-    data = json.loads(text)
     # The checker often embellishes (returns full vote objects, varied id formats).
     # Coerce each entry to a clean position and a canonical key; non-position
     # entries (recommendation/tension) coerce to "" and are dropped.
@@ -424,7 +388,7 @@ def detect_drift(
     profile: CitizenProfile,
     analysis: dict[str, Any],
     section_votes: list[dict[str, Any]],
-    client: Anthropic | None = None,
+    provider: llm.LLMProvider | None = None,
 ) -> set[str]:
     """Section ids where the delegate-attributed vote contradicts the delegate's OWN
     recorded positions. Independently derives how each grounded delegate would vote
@@ -432,8 +396,7 @@ def detect_drift(
     targets = _delegate_followed_sections(profile, section_votes)
     if not targets:
         return set()
-    if client is None:
-        client = get_client()
+    provider = llm.resolve(provider, "checker")
 
     summaries = {str(s.get("section_id")): s.get("summary", "") for s in analysis.get("sections", [])}
     lines = [
@@ -449,18 +412,11 @@ def detect_drift(
             lines.append(f"  recorded position [{s.get('title', '')}]: {s.get('text', '')}")
         lines.append("")
 
-    message = client.messages.create(
-        model=CHECKER_MODEL,
+    data = provider.complete_json(
+        user="\n".join(lines),
         max_tokens=1000,
-        messages=[{"role": "user", "content": "\n".join(lines)}],
+        error_prefix="Could not parse drift response as JSON",
     )
-    text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
-    if text.startswith("```"):
-        rows = text.split("\n")
-        end = len(rows) - 1 if rows[-1].strip() == "```" else len(rows)
-        text = "\n".join(rows[1:end])
-
-    data = json.loads(text)
     expected = {}
     for k, v in data.items():
         pos = _coerce_position(v)

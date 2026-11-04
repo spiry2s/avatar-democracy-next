@@ -8,14 +8,10 @@ so prompt work isn't buried in orchestration complexity.
 
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass
 from typing import Any
 
-from anthropic import Anthropic
-
-from backend.config import MODEL
+from backend import llm
 
 MAX_SINGLE_PASS_CHARS = 200_000
 
@@ -127,57 +123,37 @@ Bill text follows. Output ONLY the JSON.
 """
 
 
-def get_client() -> Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY environment variable not set. "
-            "Get a key at https://console.anthropic.com"
-        )
-    return Anthropic(api_key=api_key)
-
-
-def analyze_bill(bill_text: str, client: Anthropic | None = None) -> BillAnalysis:
+def analyze_bill(
+    bill_text: str,
+    provider: llm.LLMProvider | None = None,
+) -> BillAnalysis:
     """
     Analyze a bill and return structured output.
 
+    Args:
+        bill_text: the bill text to analyze.
+        provider: optional primary-role provider. Defaults to the configured one.
+
     Raises:
         ValueError: If bill text is empty or response can't be parsed.
-        RuntimeError: If API key is not configured.
-        anthropic.APIError: If the API call fails.
+        llm.LLMConfigError: If the provider is not configured. This is a
+            RuntimeError, so callers that catch RuntimeError still see it.
+        Exception: Provider/API failures propagate (for Anthropic, anthropic.APIError).
     """
     if not bill_text or not bill_text.strip():
         raise ValueError("Bill text is empty")
 
-    if client is None:
-        client = get_client()
+    provider = llm.resolve(provider, "primary")
 
     if len(bill_text) > MAX_SINGLE_PASS_CHARS:
         bill_text = bill_text[:MAX_SINGLE_PASS_CHARS] + "\n\n[BILL TRUNCATED FOR LENGTH]"
 
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=8000,
+    data = provider.complete_json(
+        user=ANALYSIS_PROMPT + bill_text,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": ANALYSIS_PROMPT + bill_text}],
+        max_tokens=8000,
+        error_prefix="Could not parse response as JSON",
     )
-
-    response_text = "".join(
-        block.text for block in message.content if hasattr(block, "text")
-    ).strip()
-
-    # Strip markdown fences if they snuck in
-    if response_text.startswith("```"):
-        lines = response_text.split("\n")
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        response_text = "\n".join(lines[1:end])
-
-    try:
-        data = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Could not parse response as JSON: {e}\n\nResponse:\n{response_text[:500]}"
-        ) from e
 
     return BillAnalysis(
         title=data.get("title", "Untitled bill"),

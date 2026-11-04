@@ -21,9 +21,9 @@ The proposal is written up in [ai_avatar_democracy_v1.0.md](ai_avatar_democracy_
 | `/chamber` | Synthetic population used as the Proxy Chamber |
 | `/history` | Append-only audit log |
 
-Bill analysis, the operator's Avatar vote, and chamber axis-tagging call Anthropic with `AVATAR_MODEL` (default `claude-sonnet-4-6`). A second Anthropic model, `CHECKER_MODEL` (default `claude-haiku-4-5`), can cross-check that vote, compare a grounded delegate's vote with their recorded positions, and flag conflicts with bills that already passed. The synthetic chamber then votes from compass alignment, with no further model call per citizen.
+Bill analysis, the operator's Avatar vote, and chamber axis-tagging are the primary role. A checker role can cross-check that vote, compare a grounded delegate's vote with their recorded positions, and flag conflicts with bills that already passed. Every one of those calls goes through `backend/llm.py`: a system prompt and a user prompt in, text or JSON out. The provider and the model are chosen per role from config. The default provider is Anthropic for both roles, with `AVATAR_MODEL` (default `claude-sonnet-4-6`) on the primary role and `CHECKER_MODEL` (default `claude-haiku-4-5`) on the checker role, so an existing `.env` keeps today's models and today's API key. Only the Anthropic provider is implemented. The synthetic chamber then votes from compass alignment, with no further model call per citizen.
 
-Those model calls need `ANTHROPIC_API_KEY`. Pages, the profile, the bill state machine, the population, and the audit log run without a key. `GET /api/health` reports whether the key is set. `POST /api/analyze` returns HTTP 500 with an explicit message when the key is missing.
+Those model calls need `ANTHROPIC_API_KEY` while the provider is Anthropic. Pages, the profile, the bill state machine, the population, and the audit log run without a key. `GET /api/health` reports whether the configured provider's credential is set. `POST /api/analyze` returns HTTP 500 with an explicit message when that credential is missing, or when `LLM_PROVIDER` names a provider that is not implemented.
 
 ## Setup
 
@@ -86,7 +86,7 @@ From the repository root. No API key and no network:
 python -m pytest
 ```
 
-The tests cover bill lifecycle transitions, chamber tallies, population distribution, multi-model divergence matching, delegate grounding, and which sections are eligible for a drift check. They exercise that logic directly and never call Anthropic.
+The tests cover bill lifecycle transitions, chamber tallies, population distribution, multi-model divergence matching, delegate grounding, which sections are eligible for a drift check, and the LLM call sites. Provider tests inject a fake provider, so analysis, voting, axis tags, drift, and conflict checks run with no API key and no network.
 
 ## Configuration
 
@@ -94,9 +94,11 @@ Optional. Defaults live in `backend/config.py` and `backend/profile.py`. Copy `.
 
 | Variable | Default | Role |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | unset | Required for analysis, Avatar votes, axis tagging, drift checks, and conflict checks |
-| `AVATAR_MODEL` | `claude-sonnet-4-6` | Primary Anthropic model |
-| `CHECKER_MODEL` | `claude-haiku-4-5` | Second Anthropic model for divergence, drift, and cross-bill conflict |
+| `ANTHROPIC_API_KEY` | unset | Credential for the Anthropic provider. Required for analysis, Avatar votes, axis tagging, drift checks, and conflict checks while that provider is selected |
+| `LLM_PROVIDER` | `anthropic` | Vendor for the primary role. Only `anthropic` is implemented |
+| `CHECKER_PROVIDER` | `LLM_PROVIDER` | Vendor for the checker role. Unset uses the primary provider |
+| `AVATAR_MODEL` | `claude-sonnet-4-6` | Model id sent to the primary provider. The default is an Anthropic id |
+| `CHECKER_MODEL` | `claude-haiku-4-5` | Model id sent to the checker provider. The default is an Anthropic id |
 | `MULTI_MODEL_CHECK` | `1` | `0` skips the second-model vote check |
 | `DELEGATE_DRIFT_CHECK` | `1` | `0` skips drift checks |
 | `CROSS_BILL_CONFLICT_CHECK` | `1` | `0` skips conflict checks on freeze |
@@ -126,7 +128,8 @@ avatar-democracy/
 ├── sample_bill.txt              # Short fictional bill for /analyze
 ├── Start Avatar Democracy.bat   # Windows launcher; cooling-off timers set to 0
 ├── backend/
-│   ├── summarizer.py            # Bill-analysis prompt and Anthropic call
+│   ├── llm.py                   # Provider interface and the Anthropic implementation
+│   ├── summarizer.py            # Bill-analysis prompt and primary-role model call
 │   ├── extractors.py            # Pasted text, URL (HTML or PDF), uploaded PDF
 │   ├── avatar.py                # Avatar vote, second-model divergence, drift check
 │   ├── profile.py               # Compass, values, delegates, recorded positions
@@ -157,7 +160,8 @@ avatar-democracy/
 │   ├── test_chamber.py
 │   ├── test_divergence.py
 │   ├── test_drift.py
-│   └── test_grounding.py
+│   ├── test_grounding.py
+│   └── test_llm.py              # Fake-provider coverage of every model call site
 ├── ai_avatar_democracy_v1.0.md  # White paper
 ├── ai_avatar_democracy_v1.0.html
 ├── ai_proxy_democracy_v0.1.md
@@ -171,14 +175,14 @@ avatar-democracy/
 └── app.js                       # Earlier script. The server serves frontend/app.js.
 ```
 
-The prompts the running app sends to Claude are the constants in `backend/summarizer.py` and `backend/avatar.py`.
+The prompts the running app sends are the constants in `backend/summarizer.py`, `backend/avatar.py`, `backend/chamber.py`, and `backend/conflict.py`. The vendor SDK is only constructed in `backend/llm.py`.
 
 ## What the prototype implements
 
-- Text extraction from a paste, a URL, or a PDF, then one Claude call that returns JSON: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions.
+- Text extraction from a paste, a URL, or a PDF, then one model call (Anthropic by default) that returns JSON: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions.
 - One local citizen profile: a six-axis compass from twelve Likert questions, a free-text values statement, and per-issue delegates. Adding a delegate waits out a cooling-off period before the Avatar follows it. Revoking a delegate is immediate. A delegate can carry recorded positions, which the vote prompt is told to cite.
-- A per-section Avatar vote. The prompt's order is delegate, then values, then compass, otherwise abstain. When `MULTI_MODEL_CHECK` is on, a second Claude model flags sections where its position differs. When `DELEGATE_DRIFT_CHECK` is on, sections attributed to a grounded delegate can be flagged against that delegate's recorded text.
-- A bill path of draft, new versions while still a draft, open for endorsement, freeze once a threshold is met, cooling-off, then voting. An emergency bill uses a higher threshold and a shorter cooling-off. On freeze the server can ask Claude whether the bill conflicts with bills already marked passed.
+- A per-section Avatar vote. The prompt's order is delegate, then values, then compass, otherwise abstain. When `MULTI_MODEL_CHECK` is on, the checker role flags sections where its position differs. When `DELEGATE_DRIFT_CHECK` is on, sections attributed to a grounded delegate can be flagged against that delegate's recorded text.
+- A bill path of draft, new versions while still a draft, open for endorsement, freeze once a threshold is met, cooling-off, then voting. An emergency bill uses a higher threshold and a shorter cooling-off. On freeze the server can ask the checker role whether the bill conflicts with bills already marked passed.
 - A chamber tally of the operator's Avatar plus a synthetic population. One model tags each section on six axes. Each synthetic citizen votes by compass alignment. A section where everyone abstains does not by itself defeat the bill. Every contested section has to pass.
 - An append-only log of profile edits, endorsements, votes, and overrides in `data/audit.jsonl`.
 
@@ -186,7 +190,7 @@ Endorsements beyond the local operator are a demo counter on the bill (`simulate
 
 ## Limits
 
-The model can misread legal language, miss a provision, or describe one that is not in the text. Check the bill. The analysis and the checker are both Anthropic models, so disagreement between them is a weak signal for vendor-level or training-data bias. The chamber is a sample of synthetic compasses, not a population of configured Avatars. This is a local single-user demo. It is not legal advice.
+The model can misread legal language, miss a provision, or describe one that is not in the text. Check the bill. By default the analysis and the checker are both Anthropic models, so disagreement between them is a weak signal for vendor-level or training-data bias. `backend/llm.py` is the seam a second vendor would plug into; that vendor is not in this build. The chamber is a sample of synthetic compasses, not a population of configured Avatars. This is a local single-user demo. It is not legal advice.
 
 ## License
 

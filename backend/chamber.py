@@ -14,23 +14,13 @@ The output tally has the same shape bills.compute_result expects, so passage
 
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
-from anthropic import Anthropic
-
-from backend.config import MODEL, CHAMBER_VOTE_TAU
+from backend import llm
+from backend.config import CHAMBER_VOTE_TAU
 from backend.questionnaire import AXES
 
 AXIS_NAMES = list(AXES.keys())
-
-
-def get_client() -> Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY environment variable not set.")
-    return Anthropic(api_key=api_key)
 
 
 # ── deterministic compass vote (pure) ────────────────────────────────────────
@@ -133,28 +123,20 @@ def _tag_prompt(analysis: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def tag_sections(analysis: dict[str, Any], client: Anthropic | None = None) -> dict[str, dict[str, float]]:
+def tag_sections(
+    analysis: dict[str, Any],
+    provider: llm.LLMProvider | None = None,
+) -> dict[str, dict[str, float]]:
     """One LLM call: map each section_id to a 6-axis tag vector."""
     if not analysis.get("sections"):
         return {}
-    if client is None:
-        client = get_client()
+    provider = llm.resolve(provider, "primary")
 
-    message = client.messages.create(
-        model=MODEL,
+    raw = provider.complete_json(
+        user=_tag_prompt(analysis),
         max_tokens=2000,
-        messages=[{"role": "user", "content": _tag_prompt(analysis)}],
+        error_prefix="Could not parse axis tags as JSON",
     )
-    text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        text = "\n".join(lines[1:end])
-
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Could not parse axis tags as JSON: {e}\n\n{text[:400]}") from e
 
     # Normalize: ensure every section has all axes as floats in [-1, 1]
     tags: dict[str, dict[str, float]] = {}
