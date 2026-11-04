@@ -151,10 +151,30 @@ downloadJson.addEventListener('click', () => {
 function renderResults(a, sourceChars) {
   // Title
   resultsTitle.textContent = a.title || 'Analysis';
+  renderGroundingBanner(a);
+
+  const titleBadge = a.title_grounded === false
+    ? '<p><span class="sig-badge sig-high">title ungrounded</span> <span class="muted">Shown here. Withheld from the Avatar, the chamber, and the conflict check.</span></p>'
+    : (a.title_grounded === true
+      ? '<p><span class="sig-badge sig-low">title grounded</span></p>'
+      : '');
+  const summaryBadge = a.plain_summary_grounded === false
+    ? '<p><span class="sig-badge sig-high">summary ungrounded</span> <span class="muted">Shown here, withheld from the Avatar.</span></p>'
+    : (a.plain_summary_grounded === true
+      ? '<p><span class="sig-badge sig-low">summary grounded</span></p>'
+      : '');
 
   // Summary
   document.getElementById('summary-body').innerHTML =
-    `<p>${escHtml(a.plain_summary)}</p>` + renderMetadata(a.metadata, sourceChars);
+    titleBadge + renderQuote({
+      quote: a.title_quote,
+      grounded: a.title_grounded,
+      grounding_reason: a.title_grounding_reason,
+    }) + summaryBadge + `<p>${escHtml(a.plain_summary)}</p>` + renderQuote({
+      quote: a.plain_summary_quote,
+      grounded: a.plain_summary_grounded,
+      grounding_reason: a.plain_summary_grounding_reason,
+    }) + renderMetadata(a.metadata, sourceChars);
 
   // Sections
   const sectionsCard = document.getElementById('sections-card');
@@ -164,14 +184,17 @@ function renderResults(a, sourceChars) {
     sectionsCount.textContent = a.sections.length;
     sectionsBody.innerHTML = a.sections.map(s => {
       const sig = (s.significance || 'medium').toLowerCase();
-      return `<div class="section-item">
+      const ungrounded = s.grounded === false ? ' claim-ungrounded' : '';
+      return `<div class="section-item${ungrounded}">
         <div class="section-header">
           <span class="section-id">${escHtml(s.section_id || '')}</span>
           <span class="section-heading">${escHtml(s.heading || '')}</span>
           <span class="sig-badge sig-${sig}">${escHtml(s.significance || 'medium')}</span>
+          ${groundBadge(s)}
         </div>
         <p>${escHtml(s.summary || '')}</p>
         ${s.significance_reason ? `<p class="muted">${escHtml(s.significance_reason)}</p>` : ''}
+        ${renderQuote(s)}
       </div>`;
     }).join('');
     sectionsCard.classList.remove('hidden');
@@ -191,13 +214,16 @@ function renderResults(a, sourceChars) {
     redFlagsCount.textContent = sorted.length;
     redFlagsBody.innerHTML = sorted.map(f => {
       const sev = (f.severity || 'medium').toLowerCase();
-      return `<div class="flag-item flag-${sev}">
+      const ungrounded = f.grounded === false ? ' claim-ungrounded' : '';
+      return `<div class="flag-item flag-${sev}${ungrounded}">
         <div class="flag-header">
           <span class="sig-badge sig-${sev}">${escHtml(f.severity || 'medium')}</span>
           <span class="flag-type">${escHtml(f.type || '')}</span>
           <span class="muted">in ${escHtml(f.section || '?')}</span>
+          ${groundBadge(f)}
         </div>
         <p>${escHtml(f.description || '')}</p>
+        ${renderQuote(f)}
       </div>`;
     }).join('');
     redFlagsCard.classList.remove('hidden');
@@ -208,18 +234,29 @@ function renderResults(a, sourceChars) {
   // Beneficiaries
   const benCard = document.getElementById('beneficiaries-card');
   const benBody = document.getElementById('beneficiaries-body');
+  const claims = Array.isArray(a.beneficiary_claims) ? a.beneficiary_claims : null;
   const b = a.beneficiaries || {};
-  const hasBen = (b.benefits?.length || b.costs?.length || b.regulated?.length);
+  const hasBen = claims
+    ? claims.length > 0
+    : (b.benefits?.length || b.costs?.length || b.regulated?.length);
   if (hasBen) {
     let html = '<div class="ben-grid">';
-    if (b.benefits?.length) {
-      html += `<div><h4>Benefits</h4><ul>${b.benefits.map(x => `<li>${escHtml(x)}</li>`).join('')}</ul></div>`;
-    }
-    if (b.costs?.length) {
-      html += `<div><h4>Costs / pays</h4><ul>${b.costs.map(x => `<li>${escHtml(x)}</li>`).join('')}</ul></div>`;
-    }
-    if (b.regulated?.length) {
-      html += `<div><h4>Regulated</h4><ul>${b.regulated.map(x => `<li>${escHtml(x)}</li>`).join('')}</ul></div>`;
+    const groups = [
+      ['benefits', 'Benefits'],
+      ['costs', 'Costs / pays'],
+      ['regulated', 'Regulated'],
+    ];
+    for (const [key, label] of groups) {
+      if (claims) {
+        const items = claims.filter(c => c.group === key);
+        if (!items.length) continue;
+        html += `<div><h4>${label}</h4><ul>${items.map(c => {
+          const ungrounded = c.grounded === false ? ' class="claim-ungrounded"' : '';
+          return `<li${ungrounded}>${groundBadge(c)} ${escHtml(c.claim || '')}${renderQuote(c)}</li>`;
+        }).join('')}</ul></div>`;
+      } else if (b[key]?.length) {
+        html += `<div><h4>${label}</h4><ul>${b[key].map(x => `<li>${escHtml(x)}</li>`).join('')}</ul></div>`;
+      }
     }
     html += '</div>';
     benBody.innerHTML = html;
@@ -230,6 +267,63 @@ function renderResults(a, sourceChars) {
 
   resultsEl.classList.remove('hidden');
   resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderGroundingBanner(a) {
+  const el = document.getElementById('grounding-banner');
+  if (!el) return;
+  const blocks = [];
+  const t = a.truncation || {};
+  if (t.blocking) {
+    blocks.push(`<div class="grounding-banner blocking"><strong>Incomplete analysis.</strong> ${escHtml(t.message || 'The bill was truncated.')}</div>`);
+  } else if (t.chunked) {
+    blocks.push(`<div class="grounding-banner info">${escHtml(t.message || 'The bill was analyzed in sections.')}</div>`);
+  }
+  const g = a.grounding || {};
+  const un = (g.sections_ungrounded || 0) + (g.red_flags_ungrounded || 0) + (g.beneficiary_claims_ungrounded || 0);
+  if (un > 0) {
+    const high = g.high_severity_ungrounded_flags
+      ? ' An ungrounded high-severity flag blocks a yes or no vote on the sections it names.'
+      : '';
+    blocks.push(
+      `<div class="grounding-banner warning"><strong>${un} ungrounded claim${un === 1 ? '' : 's'}.</strong> `
+      + `A quote was missing or was not found verbatim in the bill. Those claims stay visible below and are withheld from the Avatar.${escHtml(high)}</div>`
+    );
+  }
+  el.innerHTML = blocks.join('');
+}
+
+function groundBadge(item) {
+  if (!item || item.grounded == null) return '';
+  if (item.grounded === true) return '<span class="sig-badge sig-low">grounded</span>';
+  return '<span class="sig-badge sig-high">ungrounded</span>';
+}
+
+function reasonLabel(reason) {
+  if (reason === 'missing_quote') return 'No quote was provided.';
+  if (reason === 'quote_not_in_source') return 'Quoted text was not found in the bill.';
+  if (reason === 'quote_too_short') return 'Fewer than 40 letters, digits, or punctuation. Invisible padding does not count.';
+  if (reason === 'title_not_in_quote') return 'The title wording does not appear inside its quote.';
+  if (reason === 'quote_not_in_section') return 'Quote was not found in the cited section.';
+  if (reason === 'section_unmatched') return 'Section id does not match a heading in the bill.';
+  if (reason === 'section_ambiguous') return 'Section id matches more than one heading, or names the whole bill.';
+  if (reason === 'quote_outside_analyzed_text') return 'Quote appears only in text that was not sent for analysis.';
+  if (reason === 'exact' || reason === 'exact_offset') return 'Matches the cited text.';
+  return reason || '';
+}
+
+function renderQuote(item) {
+  if (!item || (item.grounded == null && !item.quote)) return '';
+  const offsets = item.grounded === true && item.quote_start != null && item.quote_end != null
+    ? `<span class="quote-meta">characters ${escHtml(item.quote_start)}–${escHtml(item.quote_end)}</span>`
+    : '';
+  const reason = item.grounding_reason
+    ? `<span class="quote-meta">${escHtml(reasonLabel(item.grounding_reason))}</span>`
+    : '';
+  const quote = item.quote
+    ? `<blockquote class="bill-quote">${escHtml(item.quote)}</blockquote>`
+    : '<p class="muted">No verbatim quote was provided.</p>';
+  return `<div class="quote-block">${reason}${offsets}${quote}</div>`;
 }
 
 function renderMetadata(m, sourceChars) {

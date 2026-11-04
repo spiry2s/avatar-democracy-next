@@ -114,6 +114,7 @@ function renderVote(vote) {
   document.getElementById('results-title').textContent = `Your Avatar's vote: ${vote.bill_title}`;
 
   renderTally(vote);
+  renderVoteBanner(vote);
   document.getElementById('recommendation').textContent = vote.recommendation;
 
   const tensionEl = document.getElementById('tension');
@@ -152,6 +153,12 @@ function renderSection(v, idx) {
   const overridden = v._overridden ? '<span class="sig-badge sig-medium">overridden</span>' : '';
   const diverge = v.divergent ? '<span class="badge-diverge" title="A second model voted differently — treat as low-confidence">⚠ models diverge</span>' : '';
   const drift = v.delegate_drift ? '<span class="badge-drift" title="This vote contradicts the delegate\'s recorded positions — review before trusting it">⚠ delegate drift</span>' : '';
+  const blocked = v.blocked_reason
+    ? `<span class="sig-badge sig-high" title="${escHtml(v.blocked_reason)}">withheld from the vote</span>`
+    : '';
+  const modelNote = v.model_position && v.model_position !== v.position
+    ? `<p class="muted">Model output was ${escHtml(v.model_position)} and was not used.</p>`
+    : '';
   return `<div class="vote-item vote-${pos}" id="vote-${idx}">
     <div class="vote-header">
       <span class="vote-position pos-${pos}">${escHtml(v.position)}</span>
@@ -160,8 +167,11 @@ function renderSection(v, idx) {
       ${overridden}
       ${diverge}
       ${drift}
+      ${blocked}
     </div>
     <p class="vote-reasoning">${escHtml(v.reasoning)}</p>
+    ${modelNote}
+    ${v.blocked_reason ? `<p class="muted">${escHtml(v.blocked_reason)}</p>` : ''}
     <div class="vote-footer">
       <span class="vote-basis">${basisLabel}</span>
       <span class="sig-badge sig-${conf(v.confidence)}">confidence: ${escHtml(v.confidence)}</span>
@@ -173,6 +183,25 @@ function renderSection(v, idx) {
       </div>
     </div>
   </div>`;
+}
+
+function renderVoteBanner(vote) {
+  const el = document.getElementById('vote-banner');
+  if (!el) return;
+  const parts = [];
+  if (vote.truncation_blocking) {
+    parts.push(`<div class="grounding-banner blocking"><strong>No yes or no vote.</strong> ${escHtml(vote.blocking_reason || vote.recommendation || 'The bill was truncated.')}</div>`);
+  }
+  const flags = (vote.withheld_ungrounded && vote.withheld_ungrounded.high_severity_flags) || [];
+  if (flags.length) {
+    const items = flags.map(f =>
+      `<li><span class="sig-badge sig-high">ungrounded</span> ${escHtml(f.type || 'flag')} in ${escHtml(f.section || '?')}: ${escHtml(f.description || '')}</li>`
+    ).join('');
+    parts.push(`<div class="grounding-banner warning"><strong>These high-severity flags were not used for the vote.</strong> Their quotes were missing or not in the bill.<ul>${items}</ul></div>`);
+  } else if (!vote.truncation_blocking && vote.blocking_reason) {
+    parts.push(`<div class="grounding-banner warning"><strong>Ungrounded material was withheld.</strong> ${escHtml(vote.blocking_reason)}</div>`);
+  }
+  el.innerHTML = parts.join('');
 }
 
 function formatBasis(basis) {

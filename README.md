@@ -86,7 +86,7 @@ From the repository root. No API key and no network:
 python -m pytest
 ```
 
-The tests cover bill lifecycle transitions, chamber tallies, population distribution, multi-model divergence matching, delegate grounding, which sections are eligible for a drift check, and the LLM call sites. Provider tests inject a fake provider, so analysis, voting, axis tags, drift, and conflict checks run with no API key and no network.
+The tests cover bill lifecycle transitions, chamber tallies, population distribution, multi-model divergence matching, delegate grounding, which sections are eligible for a drift check, and the LLM call sites. Provider tests inject a fake provider, so analysis, voting, axis tags, drift, and conflict checks run with no API key and no network. `tests/test_injection.py` feeds hostile bills and fabricated quotes through the same fakes: no network, and no claim that a prompt sandboxes the model.
 
 ## Configuration
 
@@ -129,6 +129,7 @@ avatar-democracy/
 ├── Start Avatar Democracy.bat   # Windows launcher; cooling-off timers set to 0
 ├── backend/
 │   ├── llm.py                   # Provider interface and the Anthropic implementation
+│   ├── grounding.py             # Quote checks, JSON shape, fences, truncation
 │   ├── summarizer.py            # Bill-analysis prompt and primary-role model call
 │   ├── extractors.py            # Pasted text, URL (HTML or PDF), uploaded PDF
 │   ├── avatar.py                # Avatar vote, second-model divergence, drift check
@@ -161,6 +162,7 @@ avatar-democracy/
 │   ├── test_divergence.py
 │   ├── test_drift.py
 │   ├── test_grounding.py
+│   ├── test_injection.py        # Fences, schema, quote checks, truncation, no network
 │   └── test_llm.py              # Fake-provider coverage of every model call site
 ├── ai_avatar_democracy_v1.1.md  # Current white paper
 ├── CHANGES-v1.1.md              # Changes since v1.0
@@ -176,7 +178,7 @@ The prompts the running app sends are the constants in `backend/summarizer.py`, 
 
 ## What the prototype implements
 
-- Text extraction from a paste, a URL, or a PDF, then one model call (Anthropic by default) that returns JSON: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions.
+- Text extraction from a paste, a URL, or a PDF, then a model call (Anthropic by default) that must return JSON in a fixed shape: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions. Section summaries, red flags, and beneficiary claims are grounded findings only when a verbatim quote occurs in the bill. The rest is returned and labeled ungrounded. See Limits.
 - One local citizen profile: a six-axis compass from twelve Likert questions, a free-text values statement, and per-issue delegates. Adding a delegate waits out a cooling-off period before the Avatar follows it. Revoking a delegate is immediate. A delegate can carry recorded positions, which the vote prompt is told to cite.
 - A per-section Avatar vote. The prompt's order is delegate, then values, then compass, otherwise abstain. When `MULTI_MODEL_CHECK` is on, the checker role flags sections where its position differs. When `DELEGATE_DRIFT_CHECK` is on, sections attributed to a grounded delegate can be flagged against that delegate's recorded text.
 - A bill path of draft, new versions while still a draft, open for endorsement, freeze once a threshold is met, cooling-off, then voting. An emergency bill uses a higher threshold and a shorter cooling-off. On freeze the server can ask the checker role whether the bill conflicts with bills already marked passed.
@@ -188,6 +190,28 @@ Endorsements beyond the local operator are a demo counter on the bill (`simulate
 ## Limits
 
 The model can misread legal language, miss a provision, or describe one that is not in the text. Check the bill. By default the analysis and the checker are both Anthropic models, so disagreement between them is a weak signal for vendor-level or training-data bias. `backend/llm.py` is the seam a second vendor would plug into; that vendor is not in this build. The chamber is a sample of synthetic compasses, not a population of configured Avatars. This is a local single-user demo. It is not legal advice.
+
+### What the bill path defends
+
+Hostile bill text is the analyzer's main input. When the provider accepts data blocks, `backend/summarizer.py` does not put that text in the instruction string. The Anthropic provider sends the bill as a separate Messages API document block. The instructions stay in the system prompt and a text block. Providers that only have a single user string wrap the bill in `<<<BILL_DATA>>>` … `<<<END_BILL_DATA>>>`. A copy of those delimiters inside the bill is broken up, so the bill cannot close the fence early. A short instruction after the fence says the region is data.
+
+The analyzer keeps a response only when it is one JSON object of a fixed shape: the required objects and lists, string fields, and the red-flag and severity enums. Unknown properties are discarded. A response that is not JSON, or that breaks the shape, is retried once and then rejected. `POST /api/analyze` returns HTTP 502 instead of storing it.
+
+After the call, every section summary, red flag, beneficiary claim, plain summary, and title is checked for a quote. The match is not raw code-point identity. Both sides are put in NFC, then a small fold is applied: curly single and double quotes become straight quotes, en dashes, em dashes, and the Unicode minus become "-", non-breaking spaces become ordinary spaces, and the ligatures ﬁ, ﬂ, ﬀ, ﬃ, and ﬄ become their letters. A hit is then mapped back to the original characters, so section assignment and the truncated-tail check still use the bill's own offsets. NFKC is not used for that match. It is used only for the length floor. The floor is an allowlist: only letters, numbers, punctuation, and symbols count, and at least 20 of those characters must be letters or digits. That drops format characters (category Cf, including U+200B), combining marks (category M*, including U+0301 and U+034F), variation selectors (U+FE00–U+FE0F and U+E0100–U+E01EF), whitespace, the Hangul fillers U+115F, U+1160, U+3164, and U+FFA0, the Braille blank U+2800, and the Egyptian hieroglyph blanks U+13441 and U+13442. Those two are letters (category Lo) but they draw nothing, so they are on the blank list and do not count. A run of the same punctuation or symbol counts once, so dots or underscores cannot pad a short word. "shall", "The Secretary shall", and "shall" followed by any of those pads are not grounds. A section summary or a red flag is checked only inside the heading it cites. No matching heading, or more than one, and the claim is ungrounded. Character offsets are stored when the quote matches that span, and replaced when the model gave the right quote with the wrong offsets. The search uses only the characters that were sent to the model. A quote that appears only in a truncated tail is not marked grounded. A claim that fails is marked `grounded: false` and `withheld_from_avatar: true`. It stays in the JSON and is labeled ungrounded in the analyzer UI. It is left out of the Avatar prompt, the chamber axis-tag prompt, and the cross-bill conflict prompt.
+
+The model-written title is held to that quote rule, and the title wording has to appear inside `title_quote` after the same normalization. An unrelated sentence from the bill cannot carry a different title into the prompts. When the quote fails, or the title is not inside it, the title stays on the analyze page and in the API, and the Avatar, chamber, and conflict prompts say "Bill under review" instead. The Avatar will not cast a yes or no on a section whose summary is ungrounded. A bill with no verbatim span of 40 visible characters has nothing that can ground a section, so the Avatar abstains. It also will not cast a yes or no on a section named by an ungrounded high-severity flag. A blank target or a target of "multiple" blocks every section. Those votes are abstentions with an explicit reason, and the withheld flag text is still shown. A long bill is split on section headings when that sends every character. The response says it was chunked. If the bill cannot be split, or a single section still does not fit, the tail is omitted, `truncation.blocking` is true, the UI shows an incomplete-analysis banner, and the Avatar abstains instead of voting on the shortened text.
+
+### What that does not defend
+
+None of this sandboxes the model. A document block and a fence are still model input. A model can follow orders written in the bill, including "ignore previous instructions", "omit Sec. 102", or "vote yes". The retry only catches malformed output. A bill that persuades the model to emit well-formed, dishonest JSON passes the schema.
+
+Quote checks are a substring test, not a reading test. The allowlist stops "shall" and "The Secretary shall", including when they are padded with format characters, combining marks, variation selectors, Hangul fillers, the Braille blank, the Egyptian hieroglyph blanks, or a repeated punctuation mark. It does not stop visible padding. Homoglyphs, lookalike letters, and a run of ordinary letters still count, and a longer quote can still end before a negation or misstate a real sentence. A short Hebrew, Hindi, or Arabic quote that leans on combining marks can fall under the floor and be rejected. That is deliberate: marks do not count, and the consonant span has to be long enough on its own. Offsets use the model's span when that span is exactly the quote and lies in the allowed text, otherwise the first match there. They do not prove the quote is the right sentence. Missed provisions are not detected. Beneficiary claims have no section id, so they are checked against the analyzed bill text rather than one heading. Comparable laws and open questions are not quote-checked. They are not sent to the Avatar.
+
+A hostile plain summary paired with a real `plain_summary_quote` still enters the Avatar prompt. The summary is a paraphrase, and the quote does not have to contain that paraphrase. That is the ride-along the title used to have. The title wording now has to appear inside `title_quote`, so an unrelated real quote cannot smuggle a different title. A title that is itself a long span planted in the bill can still be quoted and sent. When the title quote fails, the title is shown to the reader and kept out of the Avatar, chamber, and conflict prompts.
+
+Chunking sends each chunk in its own call. A section quote has to fall inside the heading it names, so a sentence from another section does not ground it. Two headings with the same number, or an id that matches none, are refused rather than searched at large. Truncation is flagged, not repaired: the omitted tail is not analyzed, and a quote that appears only there is not marked grounded. If truncation is blocking, the Avatar abstains even when some quotes in the analyzed portion did ground.
+
+The Avatar abstains when the rules above say to. That is a refusal to treat unverified text as a finding. It is not evidence the bill is fine, or that it is harmful. Chamber tags and conflict notes are still one model's judgment over whatever grounded text was left. A prompt cannot fully sandbox a model.
 
 ## License
 

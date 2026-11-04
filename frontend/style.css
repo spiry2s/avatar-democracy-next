@@ -415,6 +415,43 @@ textarea:focus { outline: none; border-color: var(--accent); }
   margin-bottom: 6px;
 }
 
+.grounding-banner {
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.grounding-banner.blocking {
+  background: rgba(255, 95, 95, 0.08);
+  border: 1px solid rgba(255, 95, 95, 0.35);
+  color: #ffb4b4;
+}
+.grounding-banner.warning {
+  background: rgba(255, 172, 75, 0.08);
+  border: 1px solid rgba(255, 172, 75, 0.35);
+  color: var(--orange);
+}
+.grounding-banner.info {
+  background: rgba(120, 160, 255, 0.08);
+  border: 1px solid rgba(120, 160, 255, 0.3);
+  color: #c5d4ff;
+}
+.grounding-banner ul { margin: 8px 0 0; padding-left: 18px; }
+.grounding-banner li { margin: 4px 0; }
+.claim-ungrounded { border-left: 3px solid #ff8080; padding-left: 10px; }
+.quote-block { margin-top: 8px; }
+.bill-quote {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+}
+.quote-meta { font-size: 0.75rem; color: var(--text-muted); margin-right: 8px; }
+
 .flag-type {
   font-size: 0.82rem;
   font-weight: 500;
