@@ -36,13 +36,21 @@ def _provider_id(raw: str | None, default: str) -> str:
 
 
 # Vendor for the primary role: bill analysis, the operator Avatar vote, and
-# chamber axis tags. Only "anthropic" is implemented. Model ids below are sent
-# to whichever provider serves the role; the defaults are Anthropic ids, so an
-# existing deployment keeps the same models.
+# chamber axis tags. "anthropic" and "openai" (any OpenAI-compatible
+# /chat/completions server) are implemented. AVATAR_MODEL and CHECKER_MODEL
+# are Anthropic ids. The OpenAI-compatible provider does not read them.
 LLM_PROVIDER = _provider_id(os.environ.get("LLM_PROVIDER"), "anthropic")
 
-# Model for the primary role.
+# Model for the primary role when that role uses Anthropic.
 MODEL = os.environ.get("AVATAR_MODEL", "claude-sonnet-4-6")
+
+# OpenAI-compatible provider. The key is required even for a local server;
+# Ollama and vLLM accept any non-empty placeholder. Model ids are per role so
+# a Claude id is never sent to this endpoint.
+OPENAI_BASE_URL = (os.environ.get("OPENAI_BASE_URL") or "").strip() or "https://api.openai.com/v1"
+OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "").strip()
+OPENAI_CHECKER_MODEL = (os.environ.get("OPENAI_CHECKER_MODEL") or "").strip()
+OPENAI_TIMEOUT = _float_env("OPENAI_TIMEOUT", 120.0)
 
 # Endorsement thresholds by bill scope (white paper decision 8).
 # Real numbers for a US-sized population: ~50,000 ordinary, ~500,000 major,
@@ -75,14 +83,26 @@ POPULATION_SIZE = _int_env("POPULATION_SIZE", 200)
 # Deadzone for the deterministic compass vote: |alignment| below this abstains.
 CHAMBER_VOTE_TAU = _float_env("CHAMBER_VOTE_TAU", 0.12)
 
-# Capture defense (white paper decisions 25, 28): cross-check the operator's vote
-# with a second, independent model and flag sections where the two disagree, so no
-# single model silently decides. Cheap model keeps the overhead small.
-# CHECKER_PROVIDER defaults to the primary vendor. The checker role also covers
-# delegate drift and cross-bill conflict checks.
+# Second Claude pass (white paper decisions 25, 28, as this prototype implements
+# them today): another model re-checks the operator's vote and flags sections
+# where the two disagree. The default vendor is Anthropic for both roles, so
+# this is same-vendor redundancy, not an independent model family. The checker
+# role also covers delegate drift and cross-bill conflict checks.
 CHECKER_PROVIDER = _provider_id(os.environ.get("CHECKER_PROVIDER"), LLM_PROVIDER)
 CHECKER_MODEL = os.environ.get("CHECKER_MODEL", "claude-haiku-4-5")
 MULTI_MODEL_CHECK = os.environ.get("MULTI_MODEL_CHECK", "1") not in ("0", "false", "False", "")
+
+# Independent-family comparison of the bill analysis. Unset means off, and
+# analysis behaves as before. COMPARISON_MODEL is required when this is set;
+# it is never taken from AVATAR_MODEL.
+# COMPARISON_VOTE_POLICY=abstain (default): a high-severity red-flag
+# disagreement makes the Avatar abstain on that section.
+# COMPARISON_VOTE_POLICY=review: keep the primary position and flag the
+# section for human review. Neither mode lets one model silently win.
+COMPARISON_PROVIDER = _provider_id(os.environ.get("COMPARISON_PROVIDER"), "")
+COMPARISON_MODEL = (os.environ.get("COMPARISON_MODEL") or "").strip()
+_COMPARISON_POLICY = (os.environ.get("COMPARISON_VOTE_POLICY") or "abstain").strip().lower()
+COMPARISON_VOTE_POLICY = _COMPARISON_POLICY if _COMPARISON_POLICY in ("abstain", "review") else "abstain"
 
 # Capture defense (white paper decision 30): flag when a delegate-followed vote is
 # inconsistent with that delegate's OWN recorded positions — a sign the delegate has

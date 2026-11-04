@@ -928,7 +928,37 @@ select.title-field { cursor: pointer; }
   color: var(--orange);
   border: 1px solid rgba(255, 172, 75, 0.35);
 }
-.diverge-line { font-size: 0.82rem; color: var(--text-muted); margin: 6px 0; display: flex; align-items: center; gap: 8px; }
+.diverge-line { font-size: 0.82rem; color: var(--text-muted); margin: 6px 0; display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+
+.badge-review {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 95, 95, 0.16);
+  color: var(--red);
+  border: 1px solid rgba(255, 95, 95, 0.4);
+  flex-shrink: 0;
+}
+.compare-models { margin-bottom: 8px; }
+.compare-block { margin-top: 16px; }
+.compare-block h4 { font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; }
+.compare-item { padding: 10px 0; border-top: 1px solid var(--border); font-size: 0.875rem; }
+.compare-side {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.compare-quote {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
 
 /* Delegate drift — more serious (possible capture/impersonation) */
 .badge-drift {

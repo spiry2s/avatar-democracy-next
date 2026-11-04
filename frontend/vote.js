@@ -151,7 +151,9 @@ function renderSection(v, idx) {
   const pos = (v.position || 'abstain').toLowerCase();
   const basisLabel = formatBasis(v.basis);
   const overridden = v._overridden ? '<span class="sig-badge sig-medium">overridden</span>' : '';
-  const diverge = v.divergent ? '<span class="badge-diverge" title="A second model voted differently — treat as low-confidence">⚠ models diverge</span>' : '';
+  const diverge = v.divergent ? '<span class="badge-diverge" title="The checker is a second Claude pass (another Anthropic model by default), not an independent vendor. It voted differently — treat as low-confidence.">⚠ second Claude pass</span>' : '';
+  const held = v.comparison_abstained ? `<div class="diverge-line"><span class="badge-review">⚠ models disagree — abstained</span> ${escHtml(v.comparison_note || '')}</div>` : '';
+  const review = v.needs_human_review ? `<div class="diverge-line"><span class="badge-review">⚠ human review</span> ${escHtml(v.comparison_note || '')}</div>` : '';
   const drift = v.delegate_drift ? '<span class="badge-drift" title="This vote contradicts the delegate\'s recorded positions — review before trusting it">⚠ delegate drift</span>' : '';
   const blocked = v.blocked_reason
     ? `<span class="sig-badge sig-high" title="${escHtml(v.blocked_reason)}">withheld from the vote</span>`
@@ -172,6 +174,8 @@ function renderSection(v, idx) {
     <p class="vote-reasoning">${escHtml(v.reasoning)}</p>
     ${modelNote}
     ${v.blocked_reason ? `<p class="muted">${escHtml(v.blocked_reason)}</p>` : ''}
+    ${held}
+    ${review}
     <div class="vote-footer">
       <span class="vote-basis">${basisLabel}</span>
       <span class="sig-badge sig-${conf(v.confidence)}">confidence: ${escHtml(v.confidence)}</span>

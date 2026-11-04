@@ -34,13 +34,13 @@ from backend import (
     bills as bills_mod,
     chamber,
     config,
+    comparison,
     conflict,
     extractors,
     llm,
     population,
     profile as profile_mod,
     questionnaire,
-    summarizer,
 )
 
 # Resolve frontend directory relative to project root
@@ -183,7 +183,7 @@ async def analyze(
 
     # Run the analysis
     try:
-        analysis = summarizer.analyze_bill(bill_text)
+        analysis = comparison.analyze_for_api(bill_text)
     except RuntimeError as e:
         # Configuration errors (missing API key)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -199,13 +199,16 @@ async def analyze(
             detail=f"Analysis failed: {str(e)}",
         ) from e
 
-    return JSONResponse(
-        content={
-            "success": True,
-            "analysis": analysis.to_dict(),
-            "source_chars": len(bill_text),
-        }
-    )
+    body: dict = {
+        "success": True,
+        "analysis": analysis,
+        "source_chars": len(bill_text),
+    }
+    # Same object as analysis["model_comparison"] when a second family ran.
+    # Omitted entirely when comparison is not configured.
+    if isinstance(analysis, dict) and "model_comparison" in analysis:
+        body["model_comparison"] = analysis["model_comparison"]
+    return JSONResponse(content=body)
 
 
 # ── Avatar: profile configuration ────────────────────────────────────────────
@@ -479,7 +482,7 @@ def _freeze_and_analyze(bill: bills_mod.Bill) -> None:
             "cooling_off_until": bill.cooling_off_until, "emergency": bill.emergency,
         })
         try:
-            bill.analysis = summarizer.analyze_bill(bills_mod.frozen_text(bill)).to_dict()
+            bill.analysis = comparison.analyze_for_api(bills_mod.frozen_text(bill))
         except Exception:
             bill.analysis = None  # analysis will be retried lazily at vote time
 
@@ -556,7 +559,7 @@ async def vote_on_bill(bill_id: str) -> JSONResponse:
 
     try:
         if bill.analysis is None:
-            bill.analysis = summarizer.analyze_bill(bills_mod.frozen_text(bill)).to_dict()
+            bill.analysis = comparison.analyze_for_api(bills_mod.frozen_text(bill))
         # The operator's own Avatar votes through the full engine (values + delegates).
         av = avatar.cast_vote(bill.analysis, profile)
         bill.vote = av.to_dict()

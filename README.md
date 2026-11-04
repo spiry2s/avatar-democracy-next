@@ -22,9 +22,11 @@ The proposal is written up in [ai_avatar_democracy_v1.1.md](ai_avatar_democracy_
 | `/chamber` | Synthetic population used as the Proxy Chamber |
 | `/history` | Append-only audit log |
 
-Bill analysis, the operator's Avatar vote, and chamber axis-tagging are the primary role. A checker role can cross-check that vote, compare a grounded delegate's vote with their recorded positions, and flag conflicts with bills that already passed. Every one of those calls goes through `backend/llm.py`: a system prompt and a user prompt in, text or JSON out. The provider and the model are chosen per role from config. The default provider is Anthropic for both roles, with `AVATAR_MODEL` (default `claude-sonnet-4-6`) on the primary role and `CHECKER_MODEL` (default `claude-haiku-4-5`) on the checker role, so an existing `.env` keeps today's models and today's API key. Only the Anthropic provider is implemented. The synthetic chamber then votes from compass alignment, with no further model call per citizen.
+Bill analysis, the operator's Avatar vote, and chamber axis-tagging are the primary role. A checker role can cross-check that vote, compare a grounded delegate's vote with their recorded positions, and flag conflicts with bills that already passed. Every one of those calls goes through `backend/llm.py`: a system prompt and a user prompt in, text or JSON out. The provider and the model are chosen per role from config. The default provider is Anthropic for both roles, with `AVATAR_MODEL` (default `claude-sonnet-4-6`) on the primary role and `CHECKER_MODEL` (default `claude-haiku-4-5`) on the checker role, so an existing `.env` keeps today's models and today's API key. `MULTI_MODEL_CHECK` is a second Claude pass: another Anthropic model re-checking the vote. It is not an independent vendor. The synthetic chamber then votes from compass alignment, with no further model call per citizen.
 
-Those model calls need `ANTHROPIC_API_KEY` while the provider is Anthropic. Pages, the profile, the bill state machine, the population, and the audit log run without a key. `GET /api/health` reports whether the configured provider's credential is set. `POST /api/analyze` returns HTTP 500 with an explicit message when that credential is missing, or when `LLM_PROVIDER` names a provider that is not implemented.
+An OpenAI-compatible provider (`LLM_PROVIDER=openai`, or `COMPARISON_PROVIDER=openai`) posts to `{OPENAI_BASE_URL}/chat/completions`. That covers OpenAI, OpenRouter, vLLM, and Ollama. It uses `OPENAI_MODEL`, `OPENAI_CHECKER_MODEL`, and `COMPARISON_MODEL`. It does not send `AVATAR_MODEL` or `CHECKER_MODEL`. When `COMPARISON_PROVIDER` is set, the same analysis prompt runs on that second model and the API returns a `model_comparison` report: sections only one model covered or summarized differently, red flags only one model raised, and beneficiary or loser claims that differ. Matching is deterministic (section id, then quote, then token overlap). No third model judges the pair. With `COMPARISON_PROVIDER` unset, analysis is unchanged and the response has no comparison report.
+
+Those model calls need `ANTHROPIC_API_KEY` while the provider is Anthropic, and `OPENAI_API_KEY` while a role uses the OpenAI-compatible provider. Pages, the profile, the bill state machine, the population, and the audit log run without a key. `GET /api/health` reports whether the configured primary provider's credential is set. `POST /api/analyze` returns HTTP 500 with an explicit message when a required credential is missing, or when `LLM_PROVIDER` names a provider that is not implemented.
 
 ## Setup
 
@@ -102,11 +104,19 @@ Optional. Defaults live in `backend/config.py` and `backend/profile.py`. Copy `.
 | Variable | Default | Role |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | unset | Credential for the Anthropic provider. Required for analysis, Avatar votes, axis tagging, drift checks, and conflict checks while that provider is selected |
-| `LLM_PROVIDER` | `anthropic` | Vendor for the primary role. Only `anthropic` is implemented |
-| `CHECKER_PROVIDER` | `LLM_PROVIDER` | Vendor for the checker role. Unset uses the primary provider |
-| `AVATAR_MODEL` | `claude-sonnet-4-6` | Model id sent to the primary provider. The default is an Anthropic id |
-| `CHECKER_MODEL` | `claude-haiku-4-5` | Model id sent to the checker provider. The default is an Anthropic id |
-| `MULTI_MODEL_CHECK` | `1` | `0` skips the second-model vote check |
+| `LLM_PROVIDER` | `anthropic` | Vendor for the primary role. `anthropic` or `openai` |
+| `CHECKER_PROVIDER` | `LLM_PROVIDER` | Vendor for the checker role (the second Claude pass, by default). Unset uses the primary provider |
+| `AVATAR_MODEL` | `claude-sonnet-4-6` | Model id sent to Anthropic for the primary role. Not sent to the OpenAI-compatible provider |
+| `CHECKER_MODEL` | `claude-haiku-4-5` | Model id sent to Anthropic for the checker role. Not sent to the OpenAI-compatible provider |
+| `OPENAI_API_KEY` | unset | Credential for the OpenAI-compatible provider. Any non-empty placeholder works for a local server that does not check a key |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL. The client posts to `{base}/chat/completions` |
+| `OPENAI_MODEL` | unset | Model id for the primary role when that role uses `openai`. Required in that case |
+| `OPENAI_CHECKER_MODEL` | unset | Model id for the checker role when that role uses `openai`. Falls back to `OPENAI_MODEL`, never to `CHECKER_MODEL` |
+| `OPENAI_TIMEOUT` | `120` | Seconds for one OpenAI-compatible HTTP call |
+| `COMPARISON_PROVIDER` | unset | Second model family for bill analysis. Unset leaves analysis unchanged |
+| `COMPARISON_MODEL` | unset | Model id for the comparison role. Required when `COMPARISON_PROVIDER` is set. Not taken from `AVATAR_MODEL` |
+| `COMPARISON_VOTE_POLICY` | `abstain` | `abstain` or `review`. See below |
+| `MULTI_MODEL_CHECK` | `1` | `0` skips the second Claude pass on the Avatar vote |
 | `DELEGATE_DRIFT_CHECK` | `1` | `0` skips drift checks |
 | `CROSS_BILL_CONFLICT_CHECK` | `1` | `0` skips conflict checks on freeze |
 | `POPULATION_SIZE` | `200` | Synthetic chamber size |
@@ -123,7 +133,45 @@ Optional. Defaults live in `backend/config.py` and `backend/profile.py`. Copy `.
 | `HOST` | `127.0.0.1` | Bind address |
 | `PORT` | `8000` | Bind port |
 
-`MULTI_MODEL_CHECK`, `DELEGATE_DRIFT_CHECK`, and `CROSS_BILL_CONFLICT_CHECK` turn off when set to `0`, `false`, or an empty string.
+`MULTI_MODEL_CHECK`, `DELEGATE_DRIFT_CHECK`, and `CROSS_BILL_CONFLICT_CHECK` turn off when set to `0`, `false`, or an empty string. `COMPARISON_VOTE_POLICY` accepts `abstain` or `review`. Anything else is treated as `abstain`.
+
+### A second model family
+
+Leave the primary role on Anthropic and point comparison at another server. The Claude ids stay on the Anthropic calls.
+
+OpenAI:
+
+```
+COMPARISON_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+COMPARISON_MODEL=gpt-4o
+```
+
+Ollama (open weights, OpenAI-compatible endpoint). The key is not checked; any non-empty value satisfies the missing-key check:
+
+```
+COMPARISON_PROVIDER=openai
+OPENAI_API_KEY=ollama
+OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+COMPARISON_MODEL=llama3.1:8b
+```
+
+vLLM is the same shape, for example `OPENAI_BASE_URL=http://127.0.0.1:8001/v1` and `COMPARISON_MODEL=meta-llama/Llama-3.1-8B-Instruct`. OpenRouter uses `https://openrouter.ai/api/v1` and an OpenRouter key.
+
+To run the primary role itself on that endpoint, set `LLM_PROVIDER=openai` and `OPENAI_MODEL`. Set `OPENAI_CHECKER_MODEL` if the checker role is also `openai`. Do not put a Claude id in those variables.
+
+`COMPARISON_VOTE_POLICY=abstain` (the default) withholds the vote. If one model raises a high-severity red flag the other does not, they rate the severity differently, or their high-severity conclusions contradict (including "shall" against "shall not", or different amounts), the Avatar abstains on that section. The yes or no is not counted. The primary model's position is kept on the vote as `comparison_prior_position` so you can see what was withheld. A flag labeled blank or `multiple` holds every section. An ungrounded high-severity flag is not treated as the other model's agreement.
+
+`COMPARISON_VOTE_POLICY=review` does not withhold the vote. It keeps the primary model's yes or no and only adds a human-review flag. A chamber tally still counts that yes or no. Use `abstain` when a disagreement should stop the vote.
+
+The comparison provider and model have to differ from the primary. The same provider and the same model id is refused, including when the only difference is a provider prefix (`openai/gpt-4o`), a date suffix (`gpt-4o-2024-08-06`), or a `-latest` tag. A leftover suffix that is not one of those, such as `gpt-4o` next to `gpt-4o-mini`, is ambiguous: the check still runs and the response carries `self_comparison_warning`.
+
+Agreement is checked by comparing the wording, not the meaning. The same words in a different order of numbers disagree ("from 5 to 10" is not "from 10 to 5"). A paraphrase a person would call the same claim still disagrees, so the Avatar abstains more often than a careful reader might expect. A review of cases that should have agreed found that most of them abstained for that reason.
+
+The report is `model_comparison` on `POST /api/analyze` (and on the stored bill analysis). The analyzer page shows it next to the grounding banner. The vote page shows an abstention or a human-review flag per section, alongside any quote-grounding abstention. Both models go through the same fence or document block, the same schema retry, and the same verbatim-quote check. A quote marked `grounded: false` is displayed and is not used as a match.
+
+Two models can still share biases. They can be trained on the same public text, refuse the same topics, or miss the same provision. Disagreement is evidence that the wording did not match. Agreement is not evidence that the bill says what they say, and it is not a judgment that two paraphrases mean the same thing.
 
 ## Project structure
 
@@ -136,11 +184,12 @@ avatar-democracy/
 ├── sample_bill.txt              # Short fictional bill for /analyze
 ├── Start Avatar Democracy.bat   # Windows launcher; cooling-off timers set to 0
 ├── backend/
-│   ├── llm.py                   # Provider interface and the Anthropic implementation
+│   ├── llm.py                   # Provider interface, Anthropic, OpenAI-compatible
 │   ├── grounding.py             # Quote checks, JSON shape, fences, truncation
+│   ├── comparison.py            # Second-family analysis, disagreement report, vote policy
 │   ├── summarizer.py            # Bill-analysis prompt and primary-role model call
 │   ├── extractors.py            # Pasted text, URL (HTML or PDF), uploaded PDF
-│   ├── avatar.py                # Avatar vote, second-model divergence, drift check
+│   ├── avatar.py                # Avatar vote, second Claude pass, drift check
 │   ├── profile.py               # Compass, values, delegates, recorded positions
 │   ├── questionnaire.py         # Six-axis seeding questionnaire
 │   ├── bills.py                 # Draft, endorse, cool off, vote, pass or fail
@@ -171,7 +220,8 @@ avatar-democracy/
 │   ├── test_drift.py
 │   ├── test_grounding.py
 │   ├── test_injection.py        # Fences, schema, quote checks, truncation, no network
-│   └── test_llm.py              # Fake-provider coverage of every model call site
+│   ├── test_llm.py              # Fake-provider coverage of every model call site
+│   └── test_comparison.py       # OpenAI-compatible HTTP shape, disagreement, vote policy
 ├── ai_avatar_democracy_v1.1.md  # Current white paper
 ├── CHANGES-v1.1.md              # Changes since v1.0
 ├── ai_avatar_democracy_v1.0.md  # Kept for history
@@ -186,9 +236,9 @@ The prompts the running app sends are the constants in `backend/summarizer.py`, 
 
 ## What the prototype implements
 
-- Text extraction from a paste, a URL, or a PDF, then a model call (Anthropic by default) that must return JSON in a fixed shape: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions. Section summaries, red flags, and beneficiary claims are grounded findings only when a verbatim quote occurs in the bill. The rest is returned and labeled ungrounded. See Limits.
+- Text extraction from a paste, a URL, or a PDF, then a model call (Anthropic by default) that must return JSON in a fixed shape: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions. Section summaries, red flags, and beneficiary claims are grounded findings only when a verbatim quote occurs in the bill. The rest is returned and labeled ungrounded. A configured comparison provider runs that same prompt, schema, and quote check on a second model, and the page shows where they disagree. See Limits.
 - One local citizen profile: a six-axis compass from twelve Likert questions, a free-text values statement, and per-issue delegates. Adding a delegate waits out a cooling-off period before the Avatar follows it. Revoking a delegate is immediate. A delegate can carry recorded positions, which the vote prompt is told to cite.
-- A per-section Avatar vote. The prompt's order is delegate, then values, then compass, otherwise abstain. When `MULTI_MODEL_CHECK` is on, the checker role flags sections where its position differs. When `DELEGATE_DRIFT_CHECK` is on, sections attributed to a grounded delegate can be flagged against that delegate's recorded text.
+- A per-section Avatar vote. The prompt's order is delegate, then values, then compass, otherwise abstain. When `MULTI_MODEL_CHECK` is on, a second Claude pass flags sections where its position differs. When a comparison provider is configured and the analyses disagree on a high-severity red flag, the Avatar abstains on that section (or flags it for human review, if `COMPARISON_VOTE_POLICY=review`). When `DELEGATE_DRIFT_CHECK` is on, sections attributed to a grounded delegate can be flagged against that delegate's recorded text.
 - A bill path of draft, new versions while still a draft, open for endorsement, freeze once a threshold is met, cooling-off, then voting. An emergency bill uses a higher threshold and a shorter cooling-off. On freeze the server can ask the checker role whether the bill conflicts with bills already marked passed.
 - A chamber tally of the operator's Avatar plus a synthetic population. One model tags each section on six axes. Each synthetic citizen votes by compass alignment. A section where everyone abstains does not by itself defeat the bill. Every contested section has to pass.
 - An append-only log of profile edits, endorsements, votes, and overrides in `data/audit.jsonl`.
@@ -197,7 +247,7 @@ Endorsements beyond the local operator are a demo counter on the bill (`simulate
 
 ## Limits
 
-The model can misread legal language, miss a provision, or describe one that is not in the text. Check the bill. By default the analysis and the checker are both Anthropic models, so disagreement between them is a weak signal for vendor-level or training-data bias. `backend/llm.py` is the seam a second vendor would plug into; that vendor is not in this build. The chamber is a sample of synthetic compasses, not a population of configured Avatars. This is a local single-user demo. It is not legal advice.
+The model can misread legal language, miss a provision, or describe one that is not in the text. Check the bill. The vote checker is a second Claude pass, so disagreement there is a weak signal for vendor-level bias. A comparison provider runs the same analysis on another family, which catches some of those misses. It does not cancel shared bias: two models can be trained on the same public text, refuse the same topics, or repeat the same mistake about a statute. Agreement between them is not proof. The chamber is a sample of synthetic compasses, not a population of configured Avatars. This is a local single-user demo. It is not legal advice.
 
 ### What the bill path defends
 

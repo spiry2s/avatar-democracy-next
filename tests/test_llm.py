@@ -117,8 +117,8 @@ def _json(payload: Any) -> str:
 # ── provider selection ────────────────────────────────────────────────────────
 
 
-def test_only_anthropic_is_registered():
-    assert list(llm.PROVIDERS) == ["anthropic"]
+def test_registered_providers():
+    assert list(llm.PROVIDERS) == ["anthropic", "openai"]
 
 
 def test_provider_id_blank_uses_default():
@@ -172,11 +172,12 @@ def test_checker_provider_can_differ_from_primary(monkeypatch):
 
 
 def test_unknown_provider_is_a_clear_config_error(monkeypatch):
-    monkeypatch.setattr(config, "LLM_PROVIDER", "openai")
-    with pytest.raises(llm.LLMConfigError, match="openai") as exc:
+    # "openai" is a real provider now. This still checks an unknown id.
+    monkeypatch.setattr(config, "LLM_PROVIDER", "gemini")
+    with pytest.raises(llm.LLMConfigError, match="gemini") as exc:
         llm.get_provider("primary")
     assert isinstance(exc.value, RuntimeError)
-    assert "Available providers: anthropic" in str(exc.value)
+    assert "Available providers: anthropic, openai" in str(exc.value)
 
 
 def test_unknown_role_is_a_clear_config_error():
@@ -560,11 +561,11 @@ def test_analyze_missing_key_is_explicit_500(client, monkeypatch):
 
 def test_analyze_unknown_provider_is_explicit_500(client, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setattr(config, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(config, "LLM_PROVIDER", "gemini")
     response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
     assert response.status_code == 500
     detail = response.json()["detail"]
-    assert "openai" in detail
+    assert "gemini" in detail
     assert "anthropic" in detail
 
 

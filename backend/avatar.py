@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Any
 
-from backend import llm, questionnaire
+from backend import comparison, llm, questionnaire
 from backend.config import MULTI_MODEL_CHECK, DELEGATE_DRIFT_CHECK
 from backend.grounding import (
     ANALYSIS_DATA_BEGIN,
@@ -46,11 +46,15 @@ class SectionVote:
     basis: str               # what drove it: "delegate:<name>" | "values" | "compass"
     reasoning: str
     confidence: str          # "high" | "medium" | "low"
-    divergent: bool = False  # a second model disagreed on this section (capture defense)
+    divergent: bool = False  # the second Claude pass disagreed on this section
     delegate_drift: bool = False  # delegate-followed vote contradicts the delegate's recorded positions
     grounding_block: bool = False  # forced abstain; an ungrounded claim must not drive yes/no
     blocked_reason: str = ""
     model_position: str = ""  # position the model returned before a block replaced it
+    comparison_abstained: bool = False  # independent-family disagreement forced abstain
+    needs_human_review: bool = False  # same disagreement, review policy: position is not settled
+    comparison_note: str = ""
+    comparison_prior_position: str = ""
 
 
 @dataclass
@@ -471,9 +475,10 @@ def cast_vote(
     section_votes = _apply_grounding_blocks(analysis, section_votes)
     open_votes = [sv for sv in section_votes if not sv.grounding_block]
 
-    # Capture defense: cross-check with a second model. Best-effort — a checker
-    # failure must never break the primary vote. Sections already forced to
-    # abstain are not scored; their position is not the model's to disagree with.
+    # Second Claude pass: the checker role re-reads the vote. By default that
+    # role is another Anthropic model, not a different vendor. Best-effort — a
+    # checker failure must never break the primary vote. Sections already forced
+    # to abstain are not scored; their position is not the model's to disagree with.
     if MULTI_MODEL_CHECK and open_votes:
         try:
             checker_positions = cross_check(analysis, profile, checker)
@@ -514,6 +519,12 @@ def cast_vote(
         blocked_ids = {sv.section_id for sv in blocked}
         would = [sid for sid in would if sid not in blocked_ids]
 
+    # Independent-family comparison. No-op unless the analysis carries
+    # model_comparison. Runs after grounding abstentions, so a high-severity
+    # disagreement still holds a section whose quotes checked out.
+    abstained_ids = comparison.apply_vote_policy(section_votes, analysis)
+    would = comparison.without_abstained(would, abstained_ids)
+
     return AvatarVote(
         bill_title=analysis.get("title", "Untitled bill"),
         section_votes=section_votes,
@@ -542,8 +553,12 @@ def cross_check(
     profile: CitizenProfile,
     provider: llm.LLMProvider | None = None,
 ) -> dict[str, str]:
-    """Run a second, independent model over the same vote and return its per-section
-    positions {section_id: position}. Used to flag divergence; never authoritative."""
+    """Second Claude pass over the same vote. Returns {section_id: position}.
+
+    By default the checker is another Anthropic model. The result flags
+    divergence; it is never authoritative. An independent model family is the
+    comparison report on the analysis, not this pass.
+    """
     provider = llm.resolve(provider, "checker")
 
     prompt = (

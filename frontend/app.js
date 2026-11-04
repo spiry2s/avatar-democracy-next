@@ -176,6 +176,8 @@ function renderResults(a, sourceChars) {
       grounding_reason: a.plain_summary_grounding_reason,
     }) + renderMetadata(a.metadata, sourceChars);
 
+  renderComparison(a.model_comparison);
+
   // Sections
   const sectionsCard = document.getElementById('sections-card');
   const sectionsBody = document.getElementById('sections-body');
@@ -267,6 +269,163 @@ function renderResults(a, sourceChars) {
 
   resultsEl.classList.remove('hidden');
   resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderComparison(report) {
+  const card = document.getElementById('comparison-card');
+  const body = document.getElementById('comparison-body');
+  if (!card || !body) return;
+  if (!report || !report.enabled) {
+    card.classList.add('hidden');
+    body.innerHTML = '';
+    return;
+  }
+
+  const onlyPrimary = report.sections_only_primary || [];
+  const onlyComparison = report.sections_only_comparison || [];
+  const different = report.sections_materially_different || [];
+  const flagsPrimary = report.red_flags_only_primary || [];
+  const flagsComparison = report.red_flags_only_comparison || [];
+  const benefits = report.beneficiary_differences || [];
+  const conflicts = report.beneficiary_group_conflicts || [];
+  const high = report.high_severity_disagreements || [];
+  const any = onlyPrimary.length || onlyComparison.length || different.length
+    || flagsPrimary.length || flagsComparison.length || benefits.length
+    || conflicts.length || high.length;
+
+  let html = `<p class="compare-models">${escHtml(vendorLabel(report.primary))} compared with ${escHtml(vendorLabel(report.comparison))}.</p>`;
+  if (report.policy_label) html += `<p>${escHtml(report.policy_label)}</p>`;
+  if (report.note) html += `<p class="muted">${escHtml(report.note)}</p>`;
+  if (!any) {
+    html += '<p>The two analyses did not disagree on sections, red flags, or who benefits and who pays.</p>';
+  }
+
+  if (high.length) {
+    html += '<div class="compare-block"><h4>High-severity red flags that disagree</h4>';
+    html += high.map(item => {
+      const who = item.kind === 'content'
+        ? 'Conclusions contradict'
+        : item.kind === 'severity'
+        ? (item.raised_by === 'primary' ? 'Primary rates high' : 'Comparison rates high')
+        : (item.raised_by === 'primary' ? 'Primary only' : 'Comparison only');
+      const extra = item.kind === 'severity'
+        ? `<p class="muted">The other model rates this ${escHtml(item.other_severity || 'lower')}.</p>`
+        : '';
+      return `<div class="compare-item">
+        <div class="flag-header">
+          <span class="compare-side">${escHtml(who)}</span>
+          <span class="sig-badge sig-high">high</span>
+          <span class="flag-type">${escHtml(item.type || '')}</span>
+          <span class="muted">in ${escHtml(item.section || (item.targets_all ? 'the whole bill' : '?'))}</span>
+        </div>
+        <p>${escHtml(item.description || '')}</p>
+        ${extra}
+        ${quoteLine(item.quote, item.quote_grounded)}
+      </div>`;
+    }).join('');
+    html += '</div>';
+  }
+
+  html += sectionList('Sections only the primary model covered', onlyPrimary);
+  html += sectionList('Sections only the comparison model covered', onlyComparison);
+  if (different.length) {
+    html += '<div class="compare-block"><h4>Sections summarized differently</h4>';
+    html += different.map(row => `<div class="compare-item">
+      <div class="flag-header">
+        <span class="section-id">${escHtml(row.section_id || '')}</span>
+        <span class="muted">matched by ${escHtml(matchLabel(row.matched_by))}</span>
+      </div>
+      <p><span class="compare-side">Primary</span> ${escHtml(row.primary_summary || '')}</p>
+      ${quoteLine(row.primary_quote, row.primary_quote_grounded)}
+      <p><span class="compare-side">Comparison</span> ${escHtml(row.comparison_summary || '')}</p>
+      ${quoteLine(row.comparison_quote, row.comparison_quote_grounded)}
+    </div>`).join('');
+    html += '</div>';
+  }
+
+  html += flagList('Red flags only the primary model raised', flagsPrimary, 'Primary');
+  html += flagList('Red flags only the comparison model raised', flagsComparison, 'Comparison');
+
+  if (benefits.length || conflicts.length) {
+    html += '<div class="compare-block"><h4>Who benefits and who pays</h4>';
+    conflicts.forEach(row => {
+      html += `<div class="compare-item">
+        <p>${escHtml(row.claim || '')}</p>
+        <p class="muted">Primary lists this under ${escHtml(groupLabel(row.primary_group))}; the comparison model lists it under ${escHtml(groupLabel(row.comparison_group))}. Matched by ${escHtml(matchLabel(row.matched_by))}.</p>
+        ${quoteLine(row.primary_quote, row.primary_quote_grounded)}
+        ${row.comparison_quote && row.comparison_quote !== row.primary_quote ? quoteLine(row.comparison_quote, row.comparison_quote_grounded) : ''}
+      </div>`;
+    });
+    benefits.forEach(row => {
+      html += `<div class="compare-item"><p class="compare-side">${escHtml(groupLabel(row.group))}</p>`;
+      (row.only_primary || []).forEach(claim => {
+        html += `<p>Primary only: ${escHtml(claim.claim || '')}</p>${quoteLine(claim.quote, claim.quote_grounded)}`;
+      });
+      (row.only_comparison || []).forEach(claim => {
+        html += `<p>Comparison only: ${escHtml(claim.claim || '')}</p>${quoteLine(claim.quote, claim.quote_grounded)}`;
+      });
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+
+  body.innerHTML = html;
+  card.classList.remove('hidden');
+}
+
+function vendorLabel(info) {
+  if (!info) return 'model';
+  const id = info.provider || '';
+  const name = id === 'openai' ? 'OpenAI-compatible' : (id === 'anthropic' ? 'Anthropic' : id || 'model');
+  return info.model ? `${name} · ${info.model}` : name;
+}
+
+function matchLabel(how) {
+  if (how === 'section_id') return 'section id';
+  if (how === 'quote') return 'quote';
+  if (how === 'text_overlap') return 'text overlap';
+  return how || 'text';
+}
+
+function groupLabel(group) {
+  if (group === 'benefits') return 'benefits';
+  if (group === 'costs') return 'costs / pays';
+  if (group === 'regulated') return 'regulated';
+  return group || 'unspecified';
+}
+
+function quoteLine(quote, grounded) {
+  if (!quote) return '';
+  let tag = '';
+  if (grounded === true) tag = ' <span class="muted">(verbatim quote)</span>';
+  else if (grounded === false) tag = ' <span class="muted">(quote not found in the bill)</span>';
+  return `<p class="compare-quote">${escHtml(quote)}${tag}</p>`;
+}
+
+function sectionList(title, rows) {
+  if (!rows.length) return '';
+  return `<div class="compare-block"><h4>${escHtml(title)}</h4>${rows.map(row => `<div class="compare-item">
+    <div class="flag-header">
+      <span class="section-id">${escHtml(row.section_id || '')}</span>
+      <span class="section-heading">${escHtml(row.heading || '')}</span>
+    </div>
+    <p>${escHtml(row.summary || '')}</p>
+    ${quoteLine(row.quote, row.quote_grounded)}
+  </div>`).join('')}</div>`;
+}
+
+function flagList(title, rows, side) {
+  if (!rows.length) return '';
+  return `<div class="compare-block"><h4>${escHtml(title)}</h4>${rows.map(flag => `<div class="compare-item">
+    <div class="flag-header">
+      <span class="compare-side">${escHtml(side)}</span>
+      <span class="sig-badge sig-${escHtml((flag.severity || 'medium').toLowerCase())}">${escHtml(flag.severity || 'medium')}</span>
+      <span class="flag-type">${escHtml(flag.type || '')}</span>
+      <span class="muted">in ${escHtml(flag.section || '?')}</span>
+    </div>
+    <p>${escHtml(flag.description || '')}</p>
+    ${quoteLine(flag.quote, flag.quote_grounded)}
+  </div>`).join('')}</div>`;
 }
 
 function renderGroundingBanner(a) {
