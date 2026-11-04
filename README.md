@@ -2,7 +2,7 @@
 
 Local prototype of an AI-mediated legislative process: plain-language bill analysis, one citizen Avatar, a bill lifecycle, and a synthetic Proxy Chamber.
 
-The proposal is written up in [ai_avatar_democracy_v1.0.md](ai_avatar_democracy_v1.0.md) (rendered copy: [ai_avatar_democracy_v1.0.html](ai_avatar_democracy_v1.0.html)). Earlier drafts are `ai_proxy_democracy_v0.1.md` through `ai_proxy_democracy_v0.4.md`.
+The proposal is written up in [ai_avatar_democracy_v1.1.md](ai_avatar_democracy_v1.1.md). What changed since v1.0 is in [CHANGES-v1.1.md](CHANGES-v1.1.md). [ai_avatar_democracy_v1.0.md](ai_avatar_democracy_v1.0.md) (rendered copy: [ai_avatar_democracy_v1.0.html](ai_avatar_democracy_v1.0.html)) is kept for history. Earlier drafts are `ai_proxy_democracy_v0.1.md` through `ai_proxy_democracy_v0.4.md`.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
@@ -162,7 +162,9 @@ avatar-democracy/
 │   ├── test_drift.py
 │   ├── test_grounding.py
 │   └── test_llm.py              # Fake-provider coverage of every model call site
-├── ai_avatar_democracy_v1.0.md  # White paper
+├── ai_avatar_democracy_v1.1.md  # Current white paper
+├── CHANGES-v1.1.md              # Changes since v1.0
+├── ai_avatar_democracy_v1.0.md  # Kept for history
 ├── ai_avatar_democracy_v1.0.html
 ├── ai_proxy_democracy_v0.1.md
 ├── ai_proxy_democracy_v0.2.md
