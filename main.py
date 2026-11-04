@@ -36,6 +36,7 @@ from backend import (
     config,
     conflict,
     extractors,
+    llm,
     population,
     profile as profile_mod,
     questionnaire,
@@ -115,10 +116,13 @@ async def chamber_page() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict:
-    """Health check. Also reports whether ANTHROPIC_API_KEY is set."""
+    """Health check. Reports whether the configured LLM provider has a credential.
+
+    With the default Anthropic provider this is whether ANTHROPIC_API_KEY is set.
+    """
     return {
         "status": "ok",
-        "api_key_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "api_key_configured": llm.credentials_configured(),
     }
 
 
@@ -613,7 +617,8 @@ def main() -> None:
     host = os.environ.get("HOST", "127.0.0.1")
 
     print(f"Starting Bill Summarizer on http://{host}:{port}")
-    print(f"API key configured: {bool(os.environ.get('ANTHROPIC_API_KEY'))}")
+    print(f"LLM provider: {config.LLM_PROVIDER} (primary model {config.MODEL})")
+    print(f"API key configured: {llm.credentials_configured()}")
 
     uvicorn.run(app, host=host, port=port, log_level="info")
 

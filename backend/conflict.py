@@ -8,26 +8,15 @@ One cheap LLM call; best-effort (a failure never blocks the lifecycle).
 
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
-from anthropic import Anthropic
-
-from backend.config import CHECKER_MODEL
-
-
-def get_client() -> Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY environment variable not set.")
-    return Anthropic(api_key=api_key)
+from backend import llm
 
 
 def detect_conflicts(
     analysis: dict[str, Any],
     passed_bills: list[dict[str, Any]],
-    client: Anthropic | None = None,
+    provider: llm.LLMProvider | None = None,
 ) -> list[dict[str, Any]]:
     """Compare a new bill's analysis against previously passed bills.
 
@@ -40,8 +29,7 @@ def detect_conflicts(
     """
     if not analysis or not passed_bills:
         return []
-    if client is None:
-        client = get_client()
+    provider = llm.resolve(provider, "checker")
 
     sections = "; ".join(s.get("heading", "") for s in analysis.get("sections", []))
     lines = [
@@ -61,18 +49,11 @@ def detect_conflicts(
     lines.append('Output ONLY JSON: a list of {"bill_id": "<id>", "conflict": "<one sentence>"}.')
     lines.append("Return [] if there are no genuine conflicts. No prose, no markdown fences.")
 
-    message = client.messages.create(
-        model=CHECKER_MODEL,
+    data = provider.complete_json(
+        user="\n".join(lines),
         max_tokens=1000,
-        messages=[{"role": "user", "content": "\n".join(lines)}],
+        error_prefix="Could not parse conflict response as JSON",
     )
-    text = "".join(b.text for b in message.content if hasattr(b, "text")).strip()
-    if text.startswith("```"):
-        rows = text.split("\n")
-        end = len(rows) - 1 if rows[-1].strip() == "```" else len(rows)
-        text = "\n".join(rows[1:end])
-
-    data = json.loads(text)
     if isinstance(data, dict):
         data = data.get("conflicts", [])
     if not isinstance(data, list):

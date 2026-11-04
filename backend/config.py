@@ -29,7 +29,19 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-# Model used for both the neutral analyzer and the Avatar voting engine.
+def _provider_id(raw: str | None, default: str) -> str:
+    """Normalize a provider id. A blank value keeps `default`."""
+    name = (raw or "").strip().lower()
+    return name or default
+
+
+# Vendor for the primary role: bill analysis, the operator Avatar vote, and
+# chamber axis tags. Only "anthropic" is implemented. Model ids below are sent
+# to whichever provider serves the role; the defaults are Anthropic ids, so an
+# existing deployment keeps the same models.
+LLM_PROVIDER = _provider_id(os.environ.get("LLM_PROVIDER"), "anthropic")
+
+# Model for the primary role.
 MODEL = os.environ.get("AVATAR_MODEL", "claude-sonnet-4-6")
 
 # Endorsement thresholds by bill scope (white paper decision 8).
@@ -66,6 +78,9 @@ CHAMBER_VOTE_TAU = _float_env("CHAMBER_VOTE_TAU", 0.12)
 # Capture defense (white paper decisions 25, 28): cross-check the operator's vote
 # with a second, independent model and flag sections where the two disagree, so no
 # single model silently decides. Cheap model keeps the overhead small.
+# CHECKER_PROVIDER defaults to the primary vendor. The checker role also covers
+# delegate drift and cross-bill conflict checks.
+CHECKER_PROVIDER = _provider_id(os.environ.get("CHECKER_PROVIDER"), LLM_PROVIDER)
 CHECKER_MODEL = os.environ.get("CHECKER_MODEL", "claude-haiku-4-5")
 MULTI_MODEL_CHECK = os.environ.get("MULTI_MODEL_CHECK", "1") not in ("0", "false", "False", "")
 
