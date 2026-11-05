@@ -1,5 +1,11 @@
 """Fetch a bill from an official https URL.
 
+Recognised Sejm print links are rewritten to the print PDF on
+``api.sejm.gov.pl``. congress.gov bill links are rewritten to a GovInfo PDF.
+Those hops use the checks below. A small JSON body is read only for the Sejm
+print record and, when ``CONGRESS_API_KEY`` is set, the Congress text list.
+That JSON is not returned as the bill.
+
 The only hosts that may be fetched are ``OFFICIAL_BILL_HOSTS``. Matching is
 exact: no suffix rule, no subdomain wildcard, and no environment variable
 that widens the set. To add a source, add its hostname here and cover it in
@@ -30,6 +36,9 @@ SSRF controls, in order, for the original URL and for every redirect:
 from __future__ import annotations
 
 import ipaddress
+import json
+import os
+import re
 import socket
 import ssl
 import threading
@@ -37,19 +46,24 @@ import time
 import unicodedata
 import zlib
 from dataclasses import dataclass
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import parse_qsl, quote, urljoin, urlsplit
 from collections.abc import Iterable
 
 import http.client
 
 
 class BillSourceError(Exception):
-    """A bill link was rejected or could not be read. ``detail`` is safe to show."""
+    """A bill link was rejected or could not be read. ``detail`` is safe to show.
 
-    def __init__(self, detail: str, status_code: int = 400) -> None:
+    ``code`` is a short stable token for the UI. It is not an upstream status,
+    a header name, or a challenge page.
+    """
+
+    def __init__(self, detail: str, status_code: int = 400, code: str | None = None) -> None:
         super().__init__(detail)
         self.detail = detail
         self.status_code = status_code
+        self.code = code or _CODE_OF.get(detail, "bill_source")
 
 
 # Official bill sources. The host must match one of these ASCII strings
@@ -62,10 +76,12 @@ class BillSourceError(Exception):
 #   Stortinget  stortinget.no, www.stortinget.no, data.stortinget.no
 #   Lovdata     lovdata.no, www.lovdata.no
 #   Congress    congress.gov, www.congress.gov, api.congress.gov
+#   GovInfo     govinfo.gov, www.govinfo.gov
 #
 # To add a source: put the exact https hostname in this set. Do not add a
 # pattern, a suffix, or an IP address. Then add that hostname to the
 # acceptance test. There is intentionally no ALLOWED_BILL_HOSTS env var.
+# CONGRESS_API_KEY does not add a host.
 OFFICIAL_BILL_HOSTS: frozenset[str] = frozenset({
     "sejm.gov.pl",
     "api.sejm.gov.pl",
@@ -80,13 +96,18 @@ OFFICIAL_BILL_HOSTS: frozenset[str] = frozenset({
     "congress.gov",
     "www.congress.gov",
     "api.congress.gov",
+    "govinfo.gov",
+    "www.govinfo.gov",
 })
 
 TOTAL_TIMEOUT_SECONDS = 10.0
 MAX_DOWNLOAD_BYTES = 15 * 1024 * 1024
+# Sejm and Congress metadata only. A pasted link cannot opt into this.
+METADATA_MAX_BYTES = 256 * 1024
 MAX_REDIRECTS = 3
 MAX_URL_CHARS = 2048
 _READ_CHUNK = 64 * 1024
+CHALLENGE_SCAN_BYTES = 64 * 1024
 
 _URL_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -141,10 +162,16 @@ MSG_UNSAFE = (
     "That link could not be fetched safely. "
     "Download the file and upload it instead."
 )
-MSG_TOO_MANY = (
-    "That link redirected too many times. "
-    "Download the file and upload it instead."
+# The analyzer UI is English (html lang="en" on every page, no locale
+# catalog). This is the string the error area shows.
+MSG_BLOCKED = (
+    "That site blocked automatic fetching. "
+    "Paste a PDF link instead "
+    "(for a Sejm print, https://api.sejm.gov.pl/sejm/term10/prints/3305/3305.pdf) "
+    "or paste the bill text."
 )
+# The redirect cap is the same tester-facing failure. ``code`` tells them apart.
+MSG_TOO_MANY = MSG_BLOCKED
 MSG_TOO_BIG = (
     "That document is larger than 15 MB. "
     "Download the file and upload it instead."
@@ -161,6 +188,63 @@ MSG_UPSTREAM = (
     "The official source did not return the document. "
     "Download the file and upload it instead."
 )
+
+_CODE_OF = {
+    MSG_UNSUPPORTED: "unsupported",
+    MSG_UNSAFE: "unsafe",
+    MSG_TOO_BIG: "too_big",
+    MSG_TIMEOUT: "timeout",
+    MSG_TYPE: "unsupported_type",
+    MSG_UPSTREAM: "upstream",
+    MSG_BLOCKED: "source_blocked",
+}
+
+_WAF_STATUSES = frozenset({403, 429, 503})
+_JSON_TYPES = frozenset({"application/json", "application/hal+json"})
+_CHALLENGE_BODY = (
+    "just a moment",
+    "cf-browser-verification",
+    "challenge-platform",
+    "/cdn-cgi/challenge",
+    "cf-challenge",
+    "attention required",
+    "enable javascript and cookies",
+    "checking your browser",
+    "_incapsula_resource",
+    "incapsula incident",
+    "request unsuccessful. incapsula",
+    "powered by imperva",
+)
+_SEJM_DRUK = re.compile(r"(?i)^/sejm([1-9]\d{0,2})\.nsf/druk\.xsp$")
+_SEJM_PRINT = re.compile(
+    r"(?i)^/sejm/term([1-9]\d{0,2})/prints/([0-9]+(?:-[0-9A-Za-z]+)?)(?:/)?$"
+)
+_ORKA_OPISY = re.compile(
+    r"(?i)^/proc([1-9]\d{0,2})\.nsf/opisy/([0-9]+(?:-[0-9A-Za-z]+)?)\.html?$"
+)
+_PRINT_NUMBER = re.compile(r"[0-9]+(?:-[0-9A-Za-z]+)?")
+_PDF_NAME = re.compile(r"(?i)[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.pdf")
+_CONGRESS_BILL = re.compile(
+    r"(?i)^/bill/([1-9]\d{0,2})(?:st|nd|rd|th)-congress/"
+    r"(house-bill|senate-bill|house-joint-resolution|senate-joint-resolution|"
+    r"house-concurrent-resolution|senate-concurrent-resolution|"
+    r"house-resolution|senate-resolution)/"
+    r"([1-9]\d{0,5})(?:/text)?/?$"
+)
+_CONGRESS_CODES = {
+    "house-bill": "hr",
+    "senate-bill": "s",
+    "house-joint-resolution": "hjres",
+    "senate-joint-resolution": "sjres",
+    "house-concurrent-resolution": "hconres",
+    "senate-concurrent-resolution": "sconres",
+    "house-resolution": "hres",
+    "senate-resolution": "sres",
+}
+_BILLS_PKG = re.compile(r"(?i)(?:^|/)(BILLS-\d+[a-z]+\d+[a-z0-9]*)\.pdf$")
+_API_KEY = re.compile(r"[A-Za-z0-9._-]{16,128}")
+_GOVINFO_HOSTS = frozenset({"govinfo.gov", "www.govinfo.gov"})
+_CONGRESS_HOSTS = frozenset({"congress.gov", "www.congress.gov", "api.congress.gov"})
 
 
 @dataclass(frozen=True)
@@ -277,28 +361,65 @@ def resolve_pinned_ip(host: str, deadline: float) -> str:
 def fetch_official_document(url: str) -> OfficialDocument:
     """GET an official bill URL and return its limited body.
 
-    Redirects are manual. Each hop is parsed, allowlisted, and resolved
-    again. The fourth redirect is an error and is not followed.
+    Sejm print pages and congress.gov bill pages are rewritten to a PDF
+    on an allowlisted host before the document is fetched. Redirects are
+    manual. Each hop is parsed, allowlisted, and resolved again. A hop
+    back to a URL already requested is a block. The fourth redirect is
+    not followed.
     """
     deadline = time.monotonic() + TOTAL_TIMEOUT_SECONDS
+    resolved = _resolve_source(url, deadline)
+    if resolved.document is not None:
+        return resolved.document
+    return _fetch_direct(resolved.url, deadline)
+
+
+def _fetch_direct(
+    url: str,
+    deadline: float,
+    *,
+    accept_json: bool = False,
+    max_bytes: int | None = None,
+    api_key: str | None = None,
+) -> OfficialDocument:
+    """GET ``url`` with the shared deadline. No host rewrite.
+
+    ``accept_json`` and ``max_bytes`` are the metadata step only. The key
+    is sent only to api.congress.gov, and never placed in the URL.
+    """
     current = url
     redirects = 0
+    seen: set[tuple[str, str]] = set()
     while True:
         parsed = parse_official_url(current)
+        identity = (parsed.host, parsed.target)
+        if identity in seen:
+            raise BillSourceError(MSG_BLOCKED, 409, "redirect_loop")
+        seen.add(identity)
         _check_deadline(deadline)
         ip = resolve_pinned_ip(parsed.host, deadline)
         _check_deadline(deadline)
-        hop = open_exchange(parsed.host, ip, parsed.target, deadline)
+        hop = open_exchange(
+            parsed.host,
+            ip,
+            parsed.target,
+            deadline,
+            headers=_request_headers(parsed.host, accept_json, api_key),
+            accept_json=accept_json,
+            max_bytes=max_bytes,
+        )
         if hop.status in _REDIRECTS:
             redirects += 1
             if redirects > MAX_REDIRECTS:
-                raise BillSourceError(MSG_TOO_MANY, 400)
+                raise BillSourceError(MSG_TOO_MANY, 400, "too_many_redirects")
             if not hop.location:
                 raise BillSourceError(MSG_UNSUPPORTED, 400)
             current = _next_url(parsed, hop.location)
             continue
         if hop.status != 200 or not hop.kind:
             raise BillSourceError(MSG_UPSTREAM, 502)
+        if hop.kind == "json" and not accept_json:
+            raise BillSourceError(MSG_TYPE, 400)
         return OfficialDocument(kind=hop.kind, body=hop.body, host=parsed.host)
 
 
@@ -324,7 +445,16 @@ def _new_connection(host: str, ip: str, timeout: float) -> http.client.HTTPSConn
     return _PinnedHTTPSConnection(host, ip, timeout)
 
 
-def open_exchange(host: str, ip: str, target: str, deadline: float) -> _Hop:
+def open_exchange(
+    host: str,
+    ip: str,
+    target: str,
+    deadline: float,
+    headers: dict[str, str] | None = None,
+    *,
+    accept_json: bool = False,
+    max_bytes: int | None = None,
+) -> _Hop:
     """One GET to ``ip``, presented as ``host``. No proxy, no auto-redirect."""
     remaining = _check_deadline(deadline)
     conn = _new_connection(host, ip, remaining)
@@ -332,9 +462,9 @@ def open_exchange(host: str, ip: str, target: str, deadline: float) -> _Hop:
     try:
         conn.connect()
         conn.timeout = _check_deadline(deadline)
-        conn.request("GET", target, headers=dict(_REQUEST_HEADERS))
+        conn.request("GET", target, headers=dict(headers or _REQUEST_HEADERS))
         response = conn.getresponse()
-        return _consume(response, conn, deadline)
+        return _consume(response, conn, deadline, accept_json=accept_json, max_bytes=max_bytes)
     except BillSourceError:
         raise
     except TimeoutError as exc:
@@ -347,30 +477,54 @@ def open_exchange(host: str, ip: str, target: str, deadline: float) -> _Hop:
         conn.close()
 
 
-def _consume(response: http.client.HTTPResponse, conn: http.client.HTTPSConnection, deadline: float) -> _Hop:
+def _consume(
+    response: http.client.HTTPResponse,
+    conn: http.client.HTTPSConnection,
+    deadline: float,
+    *,
+    accept_json: bool = False,
+    max_bytes: int | None = None,
+) -> _Hop:
     status = int(response.status)
     if status in _REDIRECTS:
         locations = _header_values(response, "location")
         if len(locations) != 1:
             raise BillSourceError(MSG_UNSUPPORTED, 400)
         return _Hop(status=status, location=locations[0], kind=None, body=b"")
+    if status in _WAF_STATUSES and _is_waf_challenge(response, conn, deadline):
+        raise BillSourceError(MSG_BLOCKED, 422, "source_blocked")
     if status != 200:
         raise BillSourceError(MSG_UPSTREAM, 502)
-    kinds = [_KINDS.get(_media_type(value)) for value in _header_values(response, "content-type")]
+    allowed = dict(_KINDS)
+    if accept_json:
+        for media in _JSON_TYPES:
+            allowed[media] = "json"
+    kinds = [allowed.get(_media_type(value)) for value in _header_values(response, "content-type")]
     if len(kinds) != 1 or kinds[0] is None:
         raise BillSourceError(MSG_TYPE, 400)
-    _reject_huge_content_length(response)
-    body = _read_limited(response, conn, deadline)
-    body = _decode_body(body, _header_values(response, "content-encoding"))
+    _reject_huge_content_length(response, max_bytes)
+    body = _read_limited(response, conn, deadline, max_bytes)
+    body = _decode_body(body, _header_values(response, "content-encoding"), max_bytes)
     return _Hop(status=200, location=None, kind=kinds[0], body=body)
 
 
-def _read_limited(response: http.client.HTTPResponse, conn: http.client.HTTPSConnection, deadline: float) -> bytes:
+def _byte_cap(max_bytes: int | None) -> int:
+    """The download cap for this hop. None keeps the document cap."""
+    return MAX_DOWNLOAD_BYTES if max_bytes is None else max_bytes
+
+
+def _read_limited(
+    response: http.client.HTTPResponse,
+    conn: http.client.HTTPSConnection,
+    deadline: float,
+    max_bytes: int | None = None,
+) -> bytes:
     """Read the body in chunks and stop once the cap is crossed.
 
     Content-Length is not the only limit. A missing length, a short length,
-    or a chunked body still stops at ``MAX_DOWNLOAD_BYTES``.
+    or a chunked body still stops at the cap.
     """
+    cap = _byte_cap(max_bytes)
     out = bytearray()
     while True:
         remaining = _check_deadline(deadline)
@@ -386,12 +540,12 @@ def _read_limited(response: http.client.HTTPResponse, conn: http.client.HTTPSCon
             raise BillSourceError(MSG_TIMEOUT, 504) from exc
         if not chunk:
             return bytes(out)
-        if len(out) + len(chunk) > MAX_DOWNLOAD_BYTES:
+        if len(out) + len(chunk) > cap:
             raise BillSourceError(MSG_TOO_BIG, 413)
         out += chunk
 
 
-def _reject_huge_content_length(response: http.client.HTTPResponse) -> None:
+def _reject_huge_content_length(response: http.client.HTTPResponse, max_bytes: int | None = None) -> None:
     values = _header_values(response, "content-length")
     if not values:
         return
@@ -403,48 +557,49 @@ def _reject_huge_content_length(response: http.client.HTTPResponse) -> None:
         raise BillSourceError(MSG_UNSAFE, 400) from exc
     if declared < 0:
         raise BillSourceError(MSG_UNSAFE, 400)
-    if declared > MAX_DOWNLOAD_BYTES:
+    if declared > _byte_cap(max_bytes):
         raise BillSourceError(MSG_TOO_BIG, 413)
 
 
-def _decode_body(body: bytes, encodings: Iterable[str]) -> bytes:
+def _decode_body(body: bytes, encodings: Iterable[str], max_bytes: int | None = None) -> bytes:
     for value in encodings:
         token = value.strip().lower()
         if token in {"", "identity"}:
             continue
         if token == "gzip":
-            body = _decompress_limited(zlib.decompressobj(16 + zlib.MAX_WBITS), body)
+            body = _decompress_limited(zlib.decompressobj(16 + zlib.MAX_WBITS), body, max_bytes)
             continue
         if token == "deflate":
-            body = _inflate_limited(body)
+            body = _inflate_limited(body, max_bytes)
             continue
         if token == "br":
-            body = _brotli_limited(body)
+            body = _brotli_limited(body, max_bytes)
             continue
         raise BillSourceError(MSG_TYPE, 400)
     return body
 
 
-def _inflate_limited(data: bytes) -> bytes:
+def _inflate_limited(data: bytes, max_bytes: int | None = None) -> bytes:
     errors: list[Exception] = []
     for wbits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
         try:
-            return _decompress_limited(zlib.decompressobj(wbits), data)
+            return _decompress_limited(zlib.decompressobj(wbits), data, max_bytes)
         except zlib.error as exc:
             errors.append(exc)
     raise BillSourceError(MSG_UNSAFE, 400) from errors[-1]
 
 
-def _decompress_limited(decoder: zlib.Decompress, data: bytes) -> bytes:
+def _decompress_limited(decoder: zlib.Decompress, data: bytes, max_bytes: int | None = None) -> bytes:
+    cap = _byte_cap(max_bytes)
     out = bytearray()
     view = memoryview(data)
     for start in range(0, len(view), _READ_CHUNK):
         piece = decoder.decompress(view[start:start + _READ_CHUNK])
-        if len(out) + len(piece) > MAX_DOWNLOAD_BYTES:
+        if len(out) + len(piece) > cap:
             raise BillSourceError(MSG_TOO_BIG, 413)
         out += piece
     tail = decoder.flush()
-    if len(out) + len(tail) > MAX_DOWNLOAD_BYTES:
+    if len(out) + len(tail) > cap:
         raise BillSourceError(MSG_TOO_BIG, 413)
     out += tail
     return bytes(out)
@@ -542,12 +697,13 @@ def _request_target(path: str, query: str) -> str:
     return path if not query else f"{path}?{query}"
 
 
-def _brotli_limited(data: bytes) -> bytes:
+def _brotli_limited(data: bytes, max_bytes: int | None = None) -> bytes:
     """Decode brotli and stop if the decoded bytes pass the download cap."""
     try:
         import brotli
     except ImportError as exc:
         raise BillSourceError(MSG_TYPE, 400) from exc
+    cap = _byte_cap(max_bytes)
     decoder = brotli.Decompressor()
     out = bytearray()
     view = memoryview(data)
@@ -556,12 +712,12 @@ def _brotli_limited(data: bytes) -> bytes:
         for start in spans:
             chunk = view[start:start + _READ_CHUNK] if len(view) else b""
             piece = decoder.process(chunk)
-            if len(out) + len(piece) > MAX_DOWNLOAD_BYTES:
+            if len(out) + len(piece) > cap:
                 raise BillSourceError(MSG_TOO_BIG, 413)
             out += piece
         if not decoder.is_finished():
             piece = decoder.process(b"")
-            if len(out) + len(piece) > MAX_DOWNLOAD_BYTES:
+            if len(out) + len(piece) > cap:
                 raise BillSourceError(MSG_TOO_BIG, 413)
             out += piece
     except brotli.error as exc:
@@ -676,3 +832,316 @@ def _check_deadline(deadline: float) -> float:
     if remaining <= 0:
         raise BillSourceError(MSG_TIMEOUT, 504)
     return remaining
+
+
+@dataclass(frozen=True)
+class _Resolved:
+    url: str
+    document: OfficialDocument | None = None
+
+
+def _resolve_source(url: str, deadline: float) -> _Resolved:
+    """Rewrite a recognised Sejm or Congress bill URL to a PDF URL.
+
+    Anything else is returned unchanged. The original URL is allowlisted
+    before any metadata request.
+    """
+    parsed = parse_official_url(url)
+    sejm = _sejm_print_ref(parsed)
+    if sejm is not None:
+        return _resolve_sejm(sejm[0], sejm[1], deadline)
+    congress = _congress_bill_ref(parsed)
+    if congress is not None:
+        return _resolve_congress(congress[0], congress[1], congress[2], deadline)
+    return _Resolved(url=url)
+
+
+def _sejm_print_ref(parsed: OfficialUrl) -> tuple[str, str] | None:
+    """Term and print number from a recognised Sejm URL, or None."""
+    path, query = _split_target(parsed.target)
+    if parsed.host in {"sejm.gov.pl", "www.sejm.gov.pl"}:
+        match = _SEJM_DRUK.fullmatch(path)
+        if match is None:
+            return None
+        number = _query_value(query, "nr")
+        if number is None or _PRINT_NUMBER.fullmatch(number) is None:
+            return None
+        return match.group(1), number
+    if parsed.host == "orka.sejm.gov.pl":
+        match = _ORKA_OPISY.fullmatch(path)
+        if match is None:
+            return None
+        return match.group(1), match.group(2)
+    if parsed.host == "api.sejm.gov.pl":
+        match = _SEJM_PRINT.fullmatch(path)
+        if match is None:
+            return None
+        return match.group(1), match.group(2)
+    return None
+
+
+def _resolve_sejm(term: str, number: str, deadline: float) -> _Resolved:
+    """PDF for a Sejm print. Metadata JSON is internal; the PDF is the document."""
+    meta = f"https://api.sejm.gov.pl/sejm/term{term}/prints/{number}"
+    fallback = f"{meta}/{number}.pdf"
+    try:
+        document = _fetch_direct(
+            meta,
+            deadline,
+            accept_json=True,
+            max_bytes=METADATA_MAX_BYTES,
+        )
+    except BillSourceError as exc:
+        if exc.code == "timeout":
+            raise
+        return _Resolved(url=fallback)
+    if document.kind == "pdf":
+        return _Resolved(url=fallback, document=document)
+    name = _pdf_attachment_name(document.body, number) if document.kind == "json" else None
+    if not name:
+        return _Resolved(url=fallback)
+    return _Resolved(url=f"{meta}/{name}")
+
+
+def _pdf_attachment_name(body: bytes, number: str) -> str | None:
+    """An attachment whose name ends in .pdf, preferring ``{number}.pdf``."""
+    try:
+        data = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    attachments = data.get("attachments")
+    if not isinstance(attachments, list):
+        return None
+    names: list[str] = []
+    for item in attachments:
+        if isinstance(item, str) and _safe_pdf_name(item):
+            names.append(item)
+    if not names:
+        return None
+    preferred = f"{number}.pdf".lower()
+    for name in names:
+        if name.lower() == preferred:
+            return name
+    return names[0]
+
+
+def _safe_pdf_name(name: str) -> bool:
+    if not name.lower().endswith(".pdf"):
+        return False
+    if ".." in name or "/" in name or "\\" in name or "%" in name:
+        return False
+    return _PDF_NAME.fullmatch(name) is not None
+
+
+def _congress_bill_ref(parsed: OfficialUrl) -> tuple[str, str, str] | None:
+    """Congress number, govinfo bill type, and bill number."""
+    if parsed.host not in {"congress.gov", "www.congress.gov"}:
+        return None
+    path, _query = _split_target(parsed.target)
+    match = _CONGRESS_BILL.fullmatch(path)
+    if match is None:
+        return None
+    code = _CONGRESS_CODES.get(match.group(2).lower())
+    if code is None:
+        return None
+    return match.group(1), code, match.group(3)
+
+
+def _resolve_congress(congress: str, code: str, number: str, deadline: float) -> _Resolved:
+    """GovInfo PDF for a congress.gov bill page.
+
+    A key, when set, is read from the environment at call time and sent
+    only as a header to api.congress.gov. Without one, the keyless GovInfo
+    link service names the most recent PDF.
+    """
+    link = _govinfo_link(congress, code, number)
+    key = congress_api_key()
+    if key is None:
+        return _Resolved(url=link)
+    meta = f"https://api.congress.gov/v3/bill/{congress}/{code}/{number}/text?format=json"
+    try:
+        document = _fetch_direct(
+            meta,
+            deadline,
+            accept_json=True,
+            max_bytes=METADATA_MAX_BYTES,
+            api_key=key,
+        )
+    except BillSourceError as exc:
+        if exc.code == "timeout":
+            raise
+        return _Resolved(url=link)
+    if document.kind == "pdf":
+        return _Resolved(url=link, document=document)
+    if document.kind != "json":
+        return _Resolved(url=link)
+    found = _govinfo_pdf_from_congress_json(document.body)
+    return _Resolved(url=found or link)
+
+
+def _govinfo_link(congress: str, code: str, number: str) -> str:
+    return f"https://www.govinfo.gov/link/bills/{congress}/{code}/{number}?link-type=pdf"
+
+
+def congress_api_key() -> str | None:
+    """The Congress API key, or None when it is unset or not a single token.
+
+    A value with whitespace or a character that could break a header is
+    ignored. Nothing here invents a key.
+    """
+    raw = os.environ.get("CONGRESS_API_KEY")
+    if not isinstance(raw, str):
+        return None
+    key = raw.strip()
+    if _API_KEY.fullmatch(key) is None:
+        return None
+    return key
+
+
+def _govinfo_pdf_from_congress_json(body: bytes) -> str | None:
+    """First PDF format in the Congress text-versions payload, as a GovInfo URL."""
+    try:
+        data = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    versions = data.get("textVersions")
+    if isinstance(versions, dict):
+        nested = versions.get("textVersions")
+        if not isinstance(nested, list):
+            nested = versions.get("items")
+        versions = nested
+    if not isinstance(versions, list):
+        return None
+    for version in versions:
+        if not isinstance(version, dict):
+            continue
+        formats = version.get("formats")
+        if not isinstance(formats, list):
+            continue
+        for fmt in formats:
+            if not isinstance(fmt, dict):
+                continue
+            if str(fmt.get("type", "")).strip().lower() != "pdf":
+                continue
+            url = fmt.get("url")
+            if not isinstance(url, str):
+                continue
+            rewritten = _congress_pdf_to_govinfo(url)
+            if rewritten:
+                return rewritten
+    return None
+
+
+def _congress_pdf_to_govinfo(url: str) -> str | None:
+    """Package PDF on govinfo. A congress.gov PDF is not fetched."""
+    try:
+        parsed = parse_official_url(url)
+    except BillSourceError:
+        return None
+    if parsed.host not in _GOVINFO_HOSTS and parsed.host not in _CONGRESS_HOSTS:
+        return None
+    path = parsed.target.split("?", 1)[0]
+    match = _BILLS_PKG.search(path)
+    if match is None:
+        if parsed.host in _GOVINFO_HOSTS and path.lower().endswith(".pdf"):
+            return f"https://{parsed.host}{parsed.target}"
+        return None
+    pkg = match.group(1)
+    if ".." in pkg or "/" in pkg:
+        return None
+    return f"https://www.govinfo.gov/content/pkg/{pkg}/pdf/{pkg}.pdf"
+
+
+def _split_target(target: str) -> tuple[str, str]:
+    path, _, query = target.partition("?")
+    return path, query
+
+
+def _query_value(query: str, name: str) -> str | None:
+    wanted = name.lower()
+    try:
+        pairs = parse_qsl(query, keep_blank_values=False, errors="replace")
+    except ValueError:
+        return None
+    for key, value in pairs:
+        if key.lower() == wanted and value:
+            return value
+    return None
+
+
+def _request_headers(host: str, accept_json: bool, api_key: str | None) -> dict[str, str]:
+    headers = dict(_REQUEST_HEADERS)
+    if accept_json:
+        headers["Accept"] = "application/json"
+    if api_key and host == "api.congress.gov":
+        headers["X-Api-Key"] = api_key
+    return headers
+
+
+def _is_waf_challenge(
+    response: http.client.HTTPResponse,
+    conn: http.client.HTTPSConnection,
+    deadline: float,
+) -> bool:
+    """True when a 403, 429, or 503 looks like a Cloudflare or Imperva wall.
+
+    The body is scanned only when the headers do not already say so, and
+    only up to ``CHALLENGE_SCAN_BYTES``. Nothing from the page is returned.
+    """
+    if _challenge_headers(response):
+        return True
+    raw = _read_prefix(response, conn, deadline, CHALLENGE_SCAN_BYTES)
+    try:
+        decoded = _decode_body(raw, _header_values(response, "content-encoding"), CHALLENGE_SCAN_BYTES)
+    except BillSourceError:
+        decoded = raw
+    text = decoded[:CHALLENGE_SCAN_BYTES].decode("utf-8", errors="replace").lower()
+    return any(marker in text for marker in _CHALLENGE_BODY)
+
+
+def _challenge_headers(response: http.client.HTTPResponse) -> bool:
+    for key, value in response.getheaders():
+        name = str(key).lower().strip()
+        val = str(value).lower()
+        if name == "cf-mitigated":
+            return True
+        if name == "x-iinfo":
+            return True
+        if name == "x-cdn" and "imperva" in val:
+            return True
+        if name == "set-cookie" and ("incap_ses" in val or "visid_incap" in val):
+            return True
+    return False
+
+
+def _read_prefix(
+    response: http.client.HTTPResponse,
+    conn: http.client.HTTPSConnection,
+    deadline: float,
+    limit: int,
+) -> bytes:
+    """Read at most ``limit`` body bytes. A short read is not an error."""
+    out = bytearray()
+    while len(out) < limit:
+        remaining = _check_deadline(deadline)
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            try:
+                sock.settimeout(remaining)
+            except OSError:
+                pass
+        try:
+            chunk = response.read(min(_READ_CHUNK, limit - len(out)))
+        except TimeoutError as exc:
+            raise BillSourceError(MSG_TIMEOUT, 504) from exc
+        if not chunk:
+            break
+        need = limit - len(out)
+        if len(chunk) > need:
+            chunk = chunk[:need]
+        out += chunk
+    return bytes(out)

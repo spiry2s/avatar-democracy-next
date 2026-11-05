@@ -7,6 +7,7 @@ opens a real connection or calls a model.
 from __future__ import annotations
 
 import io
+import json
 import socket
 import threading
 from pathlib import Path
@@ -44,6 +45,8 @@ EXPECTED_HOSTS = frozenset({
     "congress.gov",
     "www.congress.gov",
     "api.congress.gov",
+    "govinfo.gov",
+    "www.govinfo.gov",
 })
 
 ACCEPTED = [
@@ -56,6 +59,12 @@ ACCEPTED = [
     ("https://lovdata.no/dokument/NL/lov/1995-02-24-12", "lovdata.no", "/dokument/NL/lov/1995-02-24-12"),
     ("https://www.congress.gov/bill/118th-congress/house-bill/7521/text", "www.congress.gov", "/bill/118th-congress/house-bill/7521/text"),
     ("https://api.congress.gov/v3/bill/118/hr/7521", "api.congress.gov", "/v3/bill/118/hr/7521"),
+    ("https://govinfo.gov/link/bills/118/hr/7521?link-type=pdf", "govinfo.gov", "/link/bills/118/hr/7521?link-type=pdf"),
+    (
+        "https://www.govinfo.gov/content/pkg/BILLS-118hr7521ih/pdf/BILLS-118hr7521ih.pdf",
+        "www.govinfo.gov",
+        "/content/pkg/BILLS-118hr7521ih/pdf/BILLS-118hr7521ih.pdf",
+    ),
     ("HTTPS://WWW.CONGRESS.GOV/bill/118", "www.congress.gov", "/bill/118"),
     ("https://www.congress.gov:443/bill/118", "www.congress.gov", "/bill/118"),
     ("https://www.congress.gov/bill#@evil.example", "www.congress.gov", "/bill"),
@@ -130,6 +139,12 @@ REJECTED = [
     "file:///etc/passwd",
     "https://evil.example#www.congress.gov",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _no_congress_key(monkeypatch):
+    """Mapping tests opt in. A developer key must not add a live API call."""
+    monkeypatch.delenv("CONGRESS_API_KEY", raising=False)
 
 
 @pytest.fixture
@@ -384,6 +399,8 @@ def test_uppercase_official_host_is_fetched_in_lowercase(monkeypatch):
     "224.0.0.1",
     "fc00::1",
     "fe80::1",
+    "198.18.0.1",
+    "198.19.255.254",
 ])
 def test_blocked_address_is_not_connected(monkeypatch, ip):
     assert bill_fetch.ip_is_blocked(ip) is True
@@ -573,6 +590,7 @@ def test_three_redirects_are_allowed_and_a_fourth_is_not(monkeypatch):
         bill_fetch.fetch_official_document("https://www.congress.gov/start")
     assert exc.value.status_code == 400
     assert exc.value.detail == bill_fetch.MSG_TOO_MANY
+    assert exc.value.code == "too_many_redirects"
     assert len(blocked.calls) == 4
 
 
@@ -903,6 +921,7 @@ def test_analyze_rejects_an_unsupported_url_without_calling_the_model(loopback, 
     response = loopback.post("/api/analyze", files={"url": (None, "https://example.com/bill.pdf")})
     assert response.status_code == 400
     assert response.json()["detail"] == bill_fetch.MSG_UNSUPPORTED
+    assert response.json()["code"] == "unsupported"
 
 
 def test_analyze_reports_an_empty_pdf_and_a_timeout_and_a_bad_type(loopback, monkeypatch):
@@ -1052,3 +1071,477 @@ def test_analyze_page_offers_a_bill_link_without_inline_script():
     panel = css.split(".link-panel {", 1)[1].split("}", 1)[0]
     assert "#" not in panel
     assert "var(--" in panel
+
+
+# ── Sejm and Congress PDF mapping, and bot walls ──────────────────────────────
+
+CONGRESS_KEY = "congress-test-key-0123456789"
+_LEAKS = ("cloudflare", "imperva", "incapsula", "cf-ray", "cf-mitigated", "traceback", "198.18")
+
+
+def _json_body(payload: dict) -> tuple:
+    body = json.dumps(payload).encode()
+    return (
+        200,
+        [("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(body)))],
+        [body],
+    )
+
+
+def _pdf_ok() -> tuple:
+    body = b"%PDF-1.4\n" + BILL_TEXT.encode()
+    return (200, [("Content-Type", "application/pdf"), ("Content-Length", str(len(body)))], [body])
+
+
+def _assert_blocked(err: bill_fetch.BillSourceError, code: str, status: int) -> None:
+    assert err.detail == bill_fetch.MSG_BLOCKED
+    assert err.code == code
+    assert err.status_code == status
+    lowered = err.detail.lower()
+    for leak in _LEAKS:
+        assert leak not in lowered
+    assert "https://api.sejm.gov.pl/sejm/term10/prints/3305/3305.pdf" in err.detail
+    assert "paste the bill text" in lowered
+    assert code in {"source_blocked", "redirect_loop", "too_many_redirects"}
+
+
+def test_fetch_limits_are_unchanged():
+    assert bill_fetch.MAX_REDIRECTS == 3
+    assert bill_fetch.TOTAL_TIMEOUT_SECONDS == 10.0
+    assert bill_fetch.MAX_DOWNLOAD_BYTES == 15 * 1024 * 1024
+    assert bill_fetch.METADATA_MAX_BYTES == 256 * 1024
+    assert bill_fetch.METADATA_MAX_BYTES < bill_fetch.MAX_DOWNLOAD_BYTES
+    assert bill_fetch.ip_is_blocked("198.18.0.1") is True
+    assert bill_fetch.ip_is_blocked("198.19.255.254") is True
+    assert bill_fetch.ip_is_blocked("198.20.0.1") is False
+    assert "198.18.0.0/15" in (ROOT / "backend" / "bill_fetch.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("url", [
+    "https://govinfo.gov.evil.example/pkg",
+    "https://www.govinfo.gov.evil.example/content/pkg/x",
+    "https://evil.govinfo.gov/pkg",
+    "https://notgovinfo.gov/pkg",
+    "https://govinfo.com/pkg",
+    "https://govinfo.gov.pl/pkg",
+    "https://api.govinfo.gov/packages/x",
+    "https://www.govinfo.gov.attacker.test/link/bills/118/hr/1",
+])
+def test_govinfo_lookalikes_are_rejected_before_dns(monkeypatch, url):
+    _forbid_dns(monkeypatch)
+    _forbid_httpx(monkeypatch)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document(url)
+    assert exc.value.detail == bill_fetch.MSG_UNSUPPORTED
+    assert exc.value.code == "unsupported"
+
+
+def test_govinfo_matches_the_two_hosts_exactly():
+    bare = bill_fetch.parse_official_url("https://govinfo.gov/link/bills/118/hr/1?link-type=pdf")
+    www = bill_fetch.parse_official_url(
+        "https://WWW.GOVINFO.GOV./content/pkg/BILLS-118hr1ih/pdf/BILLS-118hr1ih.pdf"
+    )
+    assert bare.host == "govinfo.gov"
+    assert www.host == "www.govinfo.gov"
+    assert bare.host in bill_fetch.OFFICIAL_BILL_HOSTS
+    assert www.host in bill_fetch.OFFICIAL_BILL_HOSTS
+    assert "api.govinfo.gov" not in bill_fetch.OFFICIAL_BILL_HOSTS
+    assert "govinfo.gov.evil.example" not in bill_fetch.OFFICIAL_BILL_HOSTS
+
+
+@pytest.mark.parametrize("url,term,number", [
+    ("https://www.sejm.gov.pl/Sejm10.nsf/druk.xsp?nr=3305", "10", "3305"),
+    ("https://sejm.gov.pl/sejm9.nsf/druk.xsp?NR=19-001&foo=1", "9", "19-001"),
+    ("https://WWW.SEJM.GOV.PL/Sejm10.nsf/druk.xsp?nr=3305", "10", "3305"),
+    ("https://api.sejm.gov.pl/sejm/term10/prints/3305", "10", "3305"),
+    ("https://api.sejm.gov.pl/sejm/term10/prints/3305/", "10", "3305"),
+    ("https://orka.sejm.gov.pl/proc10.nsf/opisy/3305.htm", "10", "3305"),
+    ("https://orka.sejm.gov.pl/proc6.nsf/opisy/2668.html", "6", "2668"),
+])
+def test_sejm_urls_are_fetched_as_the_print_pdf(monkeypatch, url, term, number):
+    _dns(monkeypatch)
+    _forbid_httpx(monkeypatch)
+    payload = {
+        "number": number,
+        "term": int(term),
+        "attachments": [f"{number}-uzas.docx", f"{number}-uzas.pdf", f"{number}.pdf"],
+    }
+    script = Scripted([_json_body(payload), _pdf_ok()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    document = bill_fetch.fetch_official_document(url)
+    assert [call[0] for call in script.calls] == ["api.sejm.gov.pl", "api.sejm.gov.pl"]
+    assert all(call[1] == PUBLIC_V4 for call in script.calls)
+    assert script.conns[0].requested[1] == f"/sejm/term{term}/prints/{number}"
+    assert script.conns[0].requested[3]["Accept"] == "application/json"
+    assert "X-Api-Key" not in script.conns[0].requested[3]
+    assert script.conns[1].requested[1] == f"/sejm/term{term}/prints/{number}/{number}.pdf"
+    assert script.conns[1].requested[3]["Accept"] == bill_fetch._REQUEST_HEADERS["Accept"]
+    assert document.kind == "pdf"
+    assert document.host == "api.sejm.gov.pl"
+
+
+def test_sejm_uses_the_only_pdf_attachment_and_rejects_an_unsafe_name(monkeypatch):
+    _dns(monkeypatch)
+    only = Scripted([
+        _json_body({"attachments": ["3305-uzas.docx", "3305-uzas.PDF"]}),
+        _pdf_ok(),
+    ])
+    monkeypatch.setattr(bill_fetch, "_new_connection", only)
+    bill_fetch.fetch_official_document("https://www.sejm.gov.pl/Sejm10.nsf/druk.xsp?nr=3305")
+    assert only.conns[1].requested[1] == "/sejm/term10/prints/3305/3305-uzas.PDF"
+
+    unsafe = Scripted([
+        _json_body({"attachments": [
+            "https://evil.example/a.pdf",
+            "../3305.pdf",
+            "3305.pdf/../../evil.pdf",
+            "note.docx",
+        ]}),
+        _pdf_ok(),
+    ])
+    monkeypatch.setattr(bill_fetch, "_new_connection", unsafe)
+    bill_fetch.fetch_official_document("https://api.sejm.gov.pl/sejm/term10/prints/3305")
+    assert unsafe.conns[1].requested[1] == "/sejm/term10/prints/3305/3305.pdf"
+    assert all(call[0] == "api.sejm.gov.pl" for call in unsafe.calls)
+
+
+def test_sejm_metadata_failure_falls_back_to_the_predictable_pdf(monkeypatch):
+    _dns(monkeypatch)
+    failed = Scripted([
+        (502, [("Content-Type", "text/plain")], [b"upstream"]),
+        _pdf_ok(),
+    ])
+    monkeypatch.setattr(bill_fetch, "_new_connection", failed)
+    document = bill_fetch.fetch_official_document("https://orka.sejm.gov.pl/proc10.nsf/opisy/3305.htm")
+    assert document.kind == "pdf"
+    assert failed.conns[1].requested[1] == "/sejm/term10/prints/3305/3305.pdf"
+
+    huge = str(bill_fetch.METADATA_MAX_BYTES + 1)
+    capped = Scripted([
+        (200, [("Content-Type", "application/json"), ("Content-Length", huge)], [b"{" * 100]),
+        _pdf_ok(),
+    ])
+    monkeypatch.setattr(bill_fetch, "_new_connection", capped)
+    bill_fetch.fetch_official_document("https://www.sejm.gov.pl/Sejm10.nsf/druk.xsp?nr=3305")
+    assert capped.conns[0].response.reads == 0
+    assert capped.conns[1].requested[1] == "/sejm/term10/prints/3305/3305.pdf"
+
+
+def test_sejm_metadata_does_not_connect_to_a_benchmarking_address(monkeypatch):
+    _dns(monkeypatch, {"api.sejm.gov.pl": ["198.18.0.1"]})
+
+    def connect(*_args, **_kwargs):
+        raise AssertionError("connected")
+
+    monkeypatch.setattr(bill_fetch, "_new_connection", connect)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document("https://www.sejm.gov.pl/Sejm10.nsf/druk.xsp?nr=3305")
+    assert exc.value.detail == bill_fetch.MSG_UNSAFE
+    assert "198.18" not in exc.value.detail
+
+
+def test_an_existing_sejm_pdf_and_an_opaque_orka_link_are_not_rewritten(monkeypatch):
+    _dns(monkeypatch)
+    direct = Scripted([_pdf_ok()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", direct)
+    bill_fetch.fetch_official_document("https://api.sejm.gov.pl/sejm/term10/prints/3305/3305.pdf")
+    assert direct.calls[0][0] == "api.sejm.gov.pl"
+    assert direct.conns[0].requested[1] == "/sejm/term10/prints/3305/3305.pdf"
+
+    orka = Scripted([_pdf_ok()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", orka)
+    file_url = "https://orka.sejm.gov.pl/Druki10ka.nsf/0/ABC/$file/3305.pdf"
+    bill_fetch.fetch_official_document(file_url)
+    assert orka.calls[0][0] == "orka.sejm.gov.pl"
+    assert orka.conns[0].requested[1] == "/Druki10ka.nsf/0/ABC/$file/3305.pdf"
+
+    opaque = Scripted([_plain()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", opaque)
+    page = "https://orka.sejm.gov.pl/Home.nsf/druk.xsp?documentId=E52B3D8D11B543D9C1258DB80062C91C"
+    bill_fetch.fetch_official_document(page)
+    assert opaque.calls[0][0] == "orka.sejm.gov.pl"
+    assert "api.sejm.gov.pl" not in [call[0] for call in opaque.calls]
+    assert opaque.conns[0].requested[1].startswith("/Home.nsf/druk.xsp?documentId=")
+
+
+@pytest.mark.parametrize("slug,code,number", [
+    ("house-bill", "hr", "7521"),
+    ("senate-bill", "s", "1"),
+    ("house-joint-resolution", "hjres", "12"),
+    ("senate-joint-resolution", "sjres", "3"),
+    ("house-concurrent-resolution", "hconres", "4"),
+    ("senate-concurrent-resolution", "sconres", "5"),
+    ("house-resolution", "hres", "6"),
+    ("senate-resolution", "sres", "7"),
+])
+def test_congress_bill_without_a_key_uses_the_govinfo_link(monkeypatch, slug, code, number):
+    _dns(monkeypatch)
+    _forbid_httpx(monkeypatch)
+    script = Scripted([
+        _redirect(f"https://www.govinfo.gov/content/pkg/BILLS-118{code}{number}ih/pdf/BILLS-118{code}{number}ih.pdf"),
+        _pdf_ok(),
+    ])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    url = f"https://www.congress.gov/bill/118th-congress/{slug}/{number}/text"
+    document = bill_fetch.fetch_official_document(url)
+    assert [call[0] for call in script.calls] == ["www.govinfo.gov", "www.govinfo.gov"]
+    assert script.conns[0].requested[1] == f"/link/bills/118/{code}/{number}?link-type=pdf"
+    assert "api.congress.gov" not in [call[0] for call in script.calls]
+    assert "X-Api-Key" not in script.conns[0].requested[3]
+    assert document.kind == "pdf"
+    assert document.host == "www.govinfo.gov"
+
+
+def test_congress_bill_without_text_suffix_and_without_www_uses_the_same_link(monkeypatch):
+    _dns(monkeypatch)
+    script = Scripted([_pdf_ok()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    bill_fetch.fetch_official_document("https://congress.gov/bill/119th-congress/senate-bill/2")
+    assert script.calls[0][0] == "www.govinfo.gov"
+    assert script.conns[0].requested[1] == "/link/bills/119/s/2?link-type=pdf"
+
+
+def test_congress_rewrite_refuses_a_benchmarking_address(monkeypatch):
+    _dns(monkeypatch, {"www.govinfo.gov": ["198.18.0.1"]})
+
+    def connect(*_args, **_kwargs):
+        raise AssertionError("connected")
+
+    monkeypatch.setattr(bill_fetch, "_new_connection", connect)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document(
+            "https://www.congress.gov/bill/118th-congress/house-bill/1"
+        )
+    assert exc.value.detail == bill_fetch.MSG_UNSAFE
+    assert "198.18" not in exc.value.detail
+
+
+def test_congress_with_a_key_uses_the_first_pdf_on_govinfo(monkeypatch):
+    monkeypatch.setenv("CONGRESS_API_KEY", CONGRESS_KEY)
+    _dns(monkeypatch)
+    _forbid_httpx(monkeypatch)
+    payload = {
+        "textVersions": [
+            {
+                "type": "Engrossed in House",
+                "formats": [
+                    {"type": "Formatted Text", "url": "https://www.congress.gov/118/bills/hr7521/BILLS-118hr7521eh.htm"},
+                    {"type": "PDF", "url": "https://www.congress.gov/118/bills/hr7521/BILLS-118hr7521eh.pdf"},
+                ],
+            },
+            {
+                "type": "Introduced in House",
+                "formats": [
+                    {"type": "PDF", "url": "https://www.congress.gov/118/bills/hr7521/BILLS-118hr7521ih.pdf"},
+                ],
+            },
+        ]
+    }
+    script = Scripted([_json_body(payload), _pdf_ok()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    document = bill_fetch.fetch_official_document(
+        "https://www.congress.gov/bill/118th-congress/house-bill/7521/text"
+    )
+    assert script.calls[0][0] == "api.congress.gov"
+    assert script.calls[0][1] == PUBLIC_V4
+    assert script.conns[0].requested[1] == "/v3/bill/118/hr/7521/text?format=json"
+    assert CONGRESS_KEY not in script.conns[0].requested[1]
+    assert script.conns[0].requested[3]["X-Api-Key"] == CONGRESS_KEY
+    assert script.conns[0].requested[3]["Accept"] == "application/json"
+    assert script.calls[1][0] == "www.govinfo.gov"
+    assert script.conns[1].requested[1] == "/content/pkg/BILLS-118hr7521eh/pdf/BILLS-118hr7521eh.pdf"
+    assert "X-Api-Key" not in script.conns[1].requested[3]
+    assert "www.congress.gov" not in [call[0] for call in script.calls]
+    assert document.kind == "pdf"
+
+
+def test_congress_key_skips_a_version_without_a_pdf_and_an_off_list_url(monkeypatch):
+    monkeypatch.setenv("CONGRESS_API_KEY", CONGRESS_KEY)
+    _dns(monkeypatch)
+    payload = {
+        "textVersions": [
+            {"type": "Reported", "formats": [{"type": "Formatted Text", "url": "https://www.congress.gov/118/bills/hr1/BILLS-118hr1rh.htm"}]},
+            {"type": "Introduced", "formats": [
+                {"type": "PDF", "url": "https://evil.example/BILLS-118hr1ih.pdf"},
+                {"type": "PDF", "url": "https://www.congress.gov/118/bills/hr1/BILLS-118hr1ih.pdf"},
+            ]},
+        ]
+    }
+    script = Scripted([_json_body(payload), _pdf_ok()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    bill_fetch.fetch_official_document("https://www.congress.gov/bill/118th-congress/house-bill/1")
+    assert [call[0] for call in script.calls] == ["api.congress.gov", "www.govinfo.gov"]
+    assert script.conns[1].requested[1] == "/content/pkg/BILLS-118hr1ih/pdf/BILLS-118hr1ih.pdf"
+
+
+def test_congress_metadata_failure_falls_back_to_the_keyless_link(monkeypatch):
+    monkeypatch.setenv("CONGRESS_API_KEY", CONGRESS_KEY)
+    _dns(monkeypatch)
+    script = Scripted([
+        (403, [("Content-Type", "text/html"), ("cf-mitigated", "challenge")], [b"<html>Just a moment</html>"]),
+        _pdf_ok(),
+    ])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    document = bill_fetch.fetch_official_document(
+        "https://www.congress.gov/bill/118th-congress/senate-bill/10/text"
+    )
+    assert script.conns[0].response.reads == 0
+    assert script.conns[0].requested[3]["X-Api-Key"] == CONGRESS_KEY
+    assert CONGRESS_KEY not in script.conns[0].requested[1]
+    assert script.calls[1][0] == "www.govinfo.gov"
+    assert script.conns[1].requested[1] == "/link/bills/118/s/10?link-type=pdf"
+    assert "X-Api-Key" not in script.conns[1].requested[3]
+    assert document.kind == "pdf"
+    assert CONGRESS_KEY not in document.body.decode()
+
+
+def test_a_congress_key_with_header_characters_is_not_sent(monkeypatch):
+    monkeypatch.setenv("CONGRESS_API_KEY", CONGRESS_KEY + "\r\nX-Injected: yes")
+    _dns(monkeypatch)
+    script = Scripted([_pdf_ok()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    bill_fetch.fetch_official_document("https://www.congress.gov/bill/118th-congress/house-bill/7521")
+    assert script.calls[0][0] == "www.govinfo.gov"
+    headers = script.conns[0].requested[3]
+    assert "X-Api-Key" not in headers
+    assert "X-Injected" not in headers
+    joined = " ".join(headers.values())
+    assert CONGRESS_KEY not in joined
+    assert "\r" not in joined and "\n" not in joined
+
+
+def test_json_is_still_rejected_outside_the_metadata_step(monkeypatch):
+    _dns(monkeypatch)
+    script = Scripted([(200, [("Content-Type", "application/json"), ("Content-Length", "2")], [b"{}"])])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document("https://www.govinfo.gov/bulkdata")
+    assert exc.value.detail == bill_fetch.MSG_TYPE
+    assert exc.value.code == "unsupported_type"
+    assert script.conns[0].response.reads == 0
+
+
+def test_a_challenge_header_is_a_blocked_fetch_and_the_body_is_not_read(monkeypatch):
+    _dns(monkeypatch)
+    cases = [
+        (403, [("Content-Type", "text/html"), ("cf-mitigated", "challenge"), ("Server", "cloudflare")]),
+        (503, [("Content-Type", "text/html"), ("X-Iinfo", "1-1-1")]),
+        (429, [("Content-Type", "text/html"), ("X-CDN", "Imperva"), ("Set-Cookie", "incap_ses_1=1")]),
+    ]
+    for status, headers in cases:
+        script = Scripted([(status, headers, [b"<html>Just a moment</html>"])])
+        monkeypatch.setattr(bill_fetch, "_new_connection", script)
+        with pytest.raises(bill_fetch.BillSourceError) as exc:
+            bill_fetch.fetch_official_document("https://www.congress.gov/search")
+        _assert_blocked(exc.value, "source_blocked", 422)
+        assert script.conns[0].response.reads == 0
+        assert exc.value.code != "upstream"
+
+
+def test_a_challenge_body_is_a_blocked_fetch_without_leaking_the_page(monkeypatch):
+    _dns(monkeypatch)
+    page = b"<html><title>Just a moment...</title><p>Checking your browser before congress.gov</p></html>"
+    script = Scripted([(403, [("Content-Type", "text/html; charset=utf-8"), ("Server", "cloudflare")], [page])])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document("https://lovdata.no/dokument/x")
+    _assert_blocked(exc.value, "source_blocked", 422)
+    assert "Just a moment" not in exc.value.detail
+    assert "congress.gov" not in exc.value.detail
+    assert script.conns[0].response.reads >= 1
+
+    import gzip
+
+    zipped = gzip.compress(b"<html>Request unsuccessful. Incapsula incident 123</html>")
+    imperva = Scripted([(429, [
+        ("Content-Type", "text/html"),
+        ("Content-Encoding", "gzip"),
+    ], [zipped])])
+    monkeypatch.setattr(bill_fetch, "_new_connection", imperva)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document("https://www.sejm.gov.pl/start")
+    _assert_blocked(exc.value, "source_blocked", 422)
+    assert "Incapsula" not in exc.value.detail
+    assert "123" not in exc.value.detail
+
+
+def test_a_plain_403_stays_an_upstream_error(monkeypatch):
+    _dns(monkeypatch)
+    script = Scripted([(403, [("Content-Type", "text/plain")], [b"Forbidden"])])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document("https://www.stortinget.no/no")
+    assert exc.value.detail == bill_fetch.MSG_UPSTREAM
+    assert exc.value.code == "upstream"
+    assert exc.value.status_code == 502
+    assert exc.value.detail != bill_fetch.MSG_BLOCKED
+
+
+def test_a_normal_page_that_mentions_a_challenge_is_not_a_block(monkeypatch):
+    _dns(monkeypatch)
+    body = b"<html><p>Just a moment while the bill is printed. " + BILL_TEXT.encode() + b"</p></html>"
+    script = Scripted([(200, [("Content-Type", "text/html")], [body])])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    document = bill_fetch.fetch_official_document("https://www.stortinget.no/no/sak")
+    assert document.kind == "html"
+    assert document.body == body
+
+
+def test_a_redirect_to_the_same_url_is_a_loop_and_is_not_followed(monkeypatch):
+    _dns(monkeypatch)
+    url = "https://www.sejm.gov.pl/Sejm10.nsf/PrzebiegProc.xsp?nr=3305"
+    script = Scripted([
+        (307, [("Location", url), ("X-CDN", "Imperva")], [b""]),
+        _plain(),
+    ])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document(url)
+    _assert_blocked(exc.value, "redirect_loop", 409)
+    assert len(script.calls) == 1
+    assert script.calls[0][0] == "www.sejm.gov.pl"
+    assert "PrzebiegProc.xsp" in script.conns[0].requested[1]
+    assert "api.sejm.gov.pl" not in [call[0] for call in script.calls]
+    assert exc.value.code != "too_many_redirects"
+    assert exc.value.code != "source_blocked"
+
+
+def test_blocked_codes_stay_distinct():
+    codes = {
+        bill_fetch.BillSourceError(bill_fetch.MSG_BLOCKED, 422, "source_blocked").code,
+        bill_fetch.BillSourceError(bill_fetch.MSG_BLOCKED, 409, "redirect_loop").code,
+        bill_fetch.BillSourceError(bill_fetch.MSG_TOO_MANY, 400, "too_many_redirects").code,
+        bill_fetch.BillSourceError(bill_fetch.MSG_UPSTREAM, 502).code,
+        bill_fetch.BillSourceError(bill_fetch.MSG_UNSUPPORTED, 400).code,
+    }
+    assert codes == {
+        "source_blocked",
+        "redirect_loop",
+        "too_many_redirects",
+        "upstream",
+        "unsupported",
+    }
+    assert len(codes) == 5
+
+
+def test_analyze_shows_the_blocked_message_and_not_the_challenge(loopback, monkeypatch):
+    _dns(monkeypatch)
+
+    def analyze(_text):
+        raise AssertionError("model was called")
+
+    monkeypatch.setattr(main.comparison, "analyze_for_api", analyze)
+    page = b"<html>Just a moment... Enable JavaScript and cookies</html>"
+    script = Scripted([(403, [("Content-Type", "text/html"), ("Server", "cloudflare")], [page])])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    response = loopback.post(
+        "/api/analyze",
+        files={"url": (None, "https://www.congress.gov/search?q=bill")},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["detail"] == bill_fetch.MSG_BLOCKED
+    assert body["code"] == "source_blocked"
+    assert "Just a moment" not in body["detail"]
+    assert "cloudflare" not in json.dumps(body).lower()
+    assert response.headers["content-type"].startswith("application/json")

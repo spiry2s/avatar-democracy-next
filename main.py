@@ -825,6 +825,10 @@ async def analyze(
     The url field is fetched by backend.bill_fetch and then analyzed through
     the same pipeline as an uploaded file. Any other host is a 400.
 
+    A bill-link failure returns ``detail`` (the message the page shows) and
+    ``code`` (a short token). A site that blocks automatic fetching uses
+    ``source_blocked``, ``redirect_loop``, or ``too_many_redirects``.
+
     Returns the structured analysis as JSON.
     """
     # Count provided inputs
@@ -854,7 +858,10 @@ async def analyze(
             # Should never reach here due to checks above
             raise HTTPException(status_code=400, detail="No source provided")
     except BillSourceError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"detail": e.detail, "code": e.code},
+        )
     except HTTPException:
         raise
     except Exception as e:
