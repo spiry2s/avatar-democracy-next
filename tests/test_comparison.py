@@ -135,7 +135,7 @@ def _vote(position: str = "yes") -> dict[str, Any]:
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return TestClient(app, base_url="http://127.0.0.1:8000")
 
 
 @pytest.fixture(autouse=True)
@@ -852,7 +852,7 @@ def test_analyze_api_includes_the_report_and_omits_it_when_unset(client, monkeyp
         "get_provider",
         lambda role="primary": FakeProvider([json.dumps(_analysis())]),
     )
-    off = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    off = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert off.status_code == 200
     off_body = off.json()
     assert off_body["success"] is True
@@ -879,7 +879,7 @@ def test_analyze_api_includes_the_report_and_omits_it_when_unset(client, monkeyp
         return FakeProvider([json.dumps(_analysis())])
 
     monkeypatch.setattr(llm, "get_provider", factory)
-    on = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    on = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert on.status_code == 200
     body = on.json()
     assert body["model_comparison"]["enabled"] is True
@@ -1568,6 +1568,6 @@ def test_analyze_api_missing_comparison_key_is_explicit_500(client, monkeypatch)
     monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    response = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert response.status_code == 500
     assert "OPENAI_API_KEY" in response.json()["detail"]

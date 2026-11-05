@@ -144,7 +144,7 @@ def _profile() -> CitizenProfile:
 
 @pytest.fixture
 def client():
-    return TestClient(main_mod.app)
+    return TestClient(main_mod.app, base_url="http://127.0.0.1:8000")
 
 
 def _configure_comparison(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -353,7 +353,7 @@ def test_analyze_endpoint_reports_truncation_without_calling_it_unparseable(clie
         )
 
     monkeypatch.setattr(llm, "get_provider", factory)
-    response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    response = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert response.status_code == 502
     detail = response.json()["detail"]
     assert "cut off" in detail

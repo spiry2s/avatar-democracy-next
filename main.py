@@ -9,21 +9,31 @@ Serves:
 Run with:
     python main.py
 
-Or with uvicorn directly:
+Or with uvicorn directly, on loopback:
     uvicorn main:app --host 127.0.0.1 --port 8000
+
+A bind address other than 127.0.0.1, ::1, or localhost requires
+APP_ACCESS_TOKEN (at least 16 characters). Loopback does not.
+Use `python main.py` for that check. Uvicorn's own --host is not visible here.
 """
 
 from __future__ import annotations
 
+import hmac
 import os
+import sys
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from typing import Optional
 
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -47,6 +57,524 @@ from backend import (
 PROJECT_ROOT = Path(__file__).parent
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
+# ── LAN access token, browser guards, startup banner ─────────────────────────
+#
+# Loopback (127.0.0.1, ::1, localhost) does not need a token. Host and Origin
+# are still checked against an allowlist, so a DNS-rebind to some other name
+# is rejected. Anyone else on this machine can still open the loopback address.
+# Any other bind address refuses to start until APP_ACCESS_TOKEN is at least
+# 16 characters, and then every /api request must send that token.
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+MIN_ACCESS_TOKEN_CHARS = 16
+RATE_LIMIT = 10
+RATE_WINDOW_SECONDS = 60.0
+RATE_LIMIT_MAX_IPS = 10_000
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
+# HTTP routes that spend a model call. One shared per-IP bucket covers all of them.
+# Backend callers behind those routes:
+#   comparison.analyze_for_api -> summarizer (llm.get_provider / llm.resolve)
+#   avatar.cast_vote -> llm.resolve for the primary vote, the checker pass, and drift
+#   chamber.tag_sections -> llm.resolve
+#   conflict.detect_conflicts -> llm.resolve
+#   _freeze_and_analyze calls analyze_for_api and, when configured, detect_conflicts
+SPENDING_ROUTES = (
+    "POST /api/analyze",
+    "POST /api/avatar/vote",
+    "POST /api/bills/{bill_id}/vote",
+    "POST /api/bills/{bill_id}/endorse",
+    "POST /api/bills/{bill_id}/simulate-endorsements",
+)
+_JSON_MEDIA = "application/json"
+_UPLOAD_MEDIA = "multipart/form-data"
+_STATE_CHANGING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_JSON_EXACT = frozenset({
+    "/api/profile",
+    "/api/profile/delegates",
+    "/api/avatar/vote",
+    "/api/avatar/override",
+    "/api/bills",
+    "/api/population/regenerate",
+})
+
+# Address and port `python main.py` resolved. Loopback port 8000 until main()
+# sets them, so the default process does not require a token.
+bind_host = "127.0.0.1"
+bind_port = 8000
+
+_rate_lock = threading.Lock()
+_rate_hits: OrderedDict[str, list[float]] = OrderedDict()
+
+
+def is_loopback_host(host: str) -> bool:
+    """True only for 127.0.0.1, ::1, and localhost. Comparison is case-insensitive."""
+    return host.strip().lower() in LOOPBACK_HOSTS
+
+
+def configured_access_token() -> str:
+    """The shared LAN token, with surrounding whitespace removed. May be empty."""
+    return os.environ.get("APP_ACCESS_TOKEN", "").strip()
+
+
+def access_token_required(host: str | None = None) -> bool:
+    """A non-loopback bind requires the token. Loopback never does."""
+    chosen = bind_host if host is None else host
+    return not is_loopback_host(chosen)
+
+
+def access_token_startup_error(host: str) -> str:
+    """Tell the operator how to set a token. Never includes the token or a key."""
+    return (
+        f"Refusing to start: {host} is not a loopback address.\n"
+        "Loopback is only 127.0.0.1, ::1, or localhost. It does not need a token;\n"
+        "Host and Origin checks still apply. Anyone else on this machine can reach it.\n"
+        "Set APP_ACCESS_TOKEN to a random value of at least 16 characters, then start again.\n"
+        "Generate one with:\n"
+        '  python3 -c "import secrets;print(secrets.token_urlsafe(24))"\n'
+        "Example:\n"
+        f"  APP_ACCESS_TOKEN='<paste the token>' python main.py --host {host}"
+    )
+
+
+def ensure_access_token(host: str) -> None:
+    """Exit before the process listens when a non-loopback bind has no usable token."""
+    if is_loopback_host(host):
+        return
+    if len(configured_access_token()) >= MIN_ACCESS_TOKEN_CHARS:
+        return
+    print(access_token_startup_error(host), file=sys.stderr, flush=True)
+    raise SystemExit(1)
+
+
+def lan_ipv4_addresses() -> list[str]:
+    """IPv4 addresses a phone on this LAN can open. Empty when none are found."""
+    import socket
+
+    found: list[str] = []
+
+    def add(ip: str) -> None:
+        if not ip or ip.startswith("127.") or ip == "0.0.0.0" or ip in found:
+            return
+        found.append(ip)
+
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # UDP connect picks the default route address and does not send a packet.
+            probe.connect(("192.0.2.1", 9))
+            add(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except OSError:
+        pass
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        infos = []
+    for info in infos:
+        try:
+            add(info[4][0])
+        except (IndexError, TypeError):
+            continue
+    return found
+
+
+def phone_urls(host: str, port: int) -> list[str]:
+    """URLs to open from a phone. A wildcard bind is expanded to LAN addresses."""
+    cleaned = host.strip()
+    if cleaned.lower() in {"0.0.0.0", "::", "[::]"}:
+        addresses = lan_ipv4_addresses()
+        if not addresses:
+            return [f"http://<this-computer-lan-ip>:{port}"]
+        return [f"http://{ip}:{port}" for ip in addresses]
+    shown = cleaned
+    if ":" in cleaned and not cleaned.startswith("["):
+        shown = f"[{cleaned}]"
+    return [f"http://{shown}:{port}"]
+
+
+def format_lan_banner(host: str, port: int, urls: list[str] | None = None) -> str:
+    """Boxed warning for stderr. Names the bind address and phone URLs.
+
+    Does not read or include APP_ACCESS_TOKEN or any API key.
+    """
+    chosen = phone_urls(host, port) if urls is None else list(urls)
+    lines = [
+        "WARNING: Avatar Democracy is listening beyond loopback.",
+        f"Bind address: {host}:{port}",
+        "Open from a phone on this network:",
+        *[f"  {url}" for url in chosen],
+        "Anyone on this network who has the token can run analyses that spend the configured API keys.",
+        "Use this only on a trusted private network.",
+        "Never use it on public Wi-Fi.",
+        "Press Ctrl+C to stop.",
+    ]
+    width = max(len(line) for line in lines)
+    border = "+" + ("-" * (width + 2)) + "+"
+    body = [f"| {line.ljust(width)} |" for line in lines]
+    return "\n".join([border, *body, border])
+
+
+def machine_host_names() -> set[str]:
+    """This machine's hostname and FQDN, lowercased, without a trailing dot."""
+    import socket
+
+    names: set[str] = set()
+    for lookup in (socket.gethostname, socket.getfqdn):
+        try:
+            value = lookup()
+        except OSError:
+            continue
+        if value:
+            names.add(value.strip().lower().rstrip("."))
+    return names
+
+
+def lan_interface_ips() -> list[str]:
+    """IPv4 and IPv6 addresses of this machine, excluding loopback."""
+    found = list(lan_ipv4_addresses())
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6)
+    except OSError:
+        infos = []
+    for info in infos:
+        try:
+            ip = str(info[4][0]).split("%", 1)[0]
+        except (IndexError, TypeError, AttributeError):
+            continue
+        if ip and ip != "::1" and ip not in found:
+            found.append(ip)
+    return found
+
+
+def extra_allowed_hosts() -> set[str]:
+    """Hostnames from ALLOWED_HOSTS. Commas separate them. `*` is not a wildcard."""
+    names: set[str] = set()
+    for part in os.environ.get("ALLOWED_HOSTS", "").split(","):
+        item = part.strip().lower().rstrip(".")
+        if item.startswith("[") and item.endswith("]"):
+            item = item[1:-1]
+        if item:
+            names.add(item)
+    return names
+
+
+def allowed_host_names() -> set[str]:
+    """Names the browser may put in Host and Origin for this bind address.
+
+    Loopback always allows 127.0.0.1, localhost, and ::1. A LAN bind also
+    allows the bound address, each interface address when the bind is
+    0.0.0.0 or ::, the machine hostname, and ALLOWED_HOSTS.
+    """
+    names = {"127.0.0.1", "localhost", "::1"}
+    names.update(extra_allowed_hosts())
+    if is_loopback_host(bind_host):
+        return names
+    cleaned = bind_host.strip().lower().strip("[]").rstrip(".")
+    if cleaned in {"0.0.0.0", "::"}:
+        for ip in lan_interface_ips():
+            names.add(ip.strip().lower().rstrip("."))
+    elif cleaned:
+        names.add(cleaned)
+    names.update(machine_host_names())
+    return names
+
+
+def _normalize_hostname(host: str) -> str:
+    return host.strip().lower().rstrip(".")
+
+
+def _parse_host_header(value: str) -> tuple[str, int | None] | None:
+    """Split a Host header into (hostname, port or None). None if it is not one host."""
+    text = value.strip()
+    if not text or any(ch in text for ch in " \t\r\n,\\@"):
+        return None
+    if text.startswith("["):
+        end = text.find("]")
+        if end <= 1:
+            return None
+        host = text[1:end]
+        rest = text[end + 1:]
+        if rest == "":
+            port: int | None = None
+        elif rest.startswith(":") and rest[1:].isdigit():
+            port = int(rest[1:])
+        else:
+            return None
+    elif text.count(":") > 1:
+        return None
+    elif ":" in text:
+        host, port_text = text.rsplit(":", 1)
+        if not port_text.isdigit():
+            return None
+        port = int(port_text)
+    else:
+        host = text
+        port = None
+    if not host or "/" in host:
+        return None
+    if port is not None and not 0 < port <= 65535:
+        return None
+    return _normalize_hostname(host), port
+
+
+def host_header_allowed(values: list[str]) -> bool:
+    """One Host header, on the allowlist, with the bound port or no port.
+
+    A second Host header is rejected. X-Forwarded-Host is not read.
+    """
+    if len(values) != 1:
+        return False
+    parsed = _parse_host_header(values[0])
+    if parsed is None:
+        return False
+    host, port = parsed
+    if port is not None and port != bind_port:
+        return False
+    return host in allowed_host_names()
+
+
+def _raw_header_values(request: Request, name: str) -> list[str]:
+    """Every value of a header, matched case-insensitively on the raw ASGI name.
+
+    Header names are compared after lowercasing so `Origin` and `origin` are
+    the same header. A second copy is not dropped.
+    """
+    wanted = name.lower().encode("latin-1")
+    values: list[str] = []
+    for key, value in request.scope.get("headers") or ():
+        if not isinstance(key, (bytes, bytearray)):
+            continue
+        if bytes(key).lower() != wanted:
+            continue
+        if isinstance(value, (bytes, bytearray)):
+            values.append(bytes(value).decode("latin-1"))
+        else:
+            values.append(str(value))
+    return values
+
+
+def _split_origin(value: str) -> tuple[str, str, int] | None:
+    """Parse an Origin or a scheme://host[:port]. None when it is not one origin."""
+    text = value.strip()
+    if not text or text.lower() == "null":
+        return None
+    if any(ch in text for ch in " \t\r\n,"):
+        return None
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return None
+    if parts.username is not None or parts.password is not None:
+        return None
+    if parts.query or parts.fragment:
+        return None
+    if parts.path not in {"", "/"}:
+        return None
+    host = parts.hostname
+    if not host:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return scheme, host.lower(), port
+
+
+def _origin_allowed(request: Request) -> bool:
+    """Missing Origin is allowed. A present Origin must name an allowed host.
+
+    The comparison is the allowlist plus http or https plus the bound port.
+    It is not "Origin equals this request's Host". `null`, a different port,
+    a different host, or more than one Origin value is rejected.
+    """
+    origins = _raw_header_values(request, "origin")
+    if not origins:
+        return True
+    if len(origins) != 1:
+        return False
+    got = _split_origin(origins[0])
+    if got is None:
+        return False
+    scheme, host, port = got
+    if scheme not in {"http", "https"}:
+        return False
+    if port != bind_port:
+        return False
+    return _normalize_hostname(host) in allowed_host_names()
+
+
+def _media_types(request: Request) -> list[str]:
+    types: list[str] = []
+    for value in _raw_header_values(request, "content-type"):
+        types.append(value.split(";", 1)[0].strip().lower())
+    return types
+
+
+def _is_json_path(path: str) -> bool:
+    if path in _JSON_EXACT:
+        return True
+    parts = [part for part in path.split("/") if part]
+    if (
+        len(parts) == 5
+        and parts[0] == "api"
+        and parts[1] == "profile"
+        and parts[2] == "delegates"
+        and parts[4] == "sources"
+    ):
+        return True
+    if (
+        len(parts) == 4
+        and parts[0] == "api"
+        and parts[1] == "bills"
+        and parts[3] in {"versions", "simulate-endorsements"}
+    ):
+        return True
+    return False
+
+
+def _expected_media_type(method: str, path: str) -> str | None:
+    """JSON endpoints require application/json. The upload endpoint requires multipart."""
+    if method not in {"POST", "PUT", "PATCH"}:
+        return None
+    if path == "/api/analyze":
+        return _UPLOAD_MEDIA
+    if _is_json_path(path):
+        return _JSON_MEDIA
+    return None
+
+
+def is_spending_request(method: str, path: str) -> bool:
+    """True for every POST that can call a model. They share one rate-limit bucket."""
+    if method != "POST":
+        return False
+    if path in {"/api/analyze", "/api/avatar/vote"}:
+        return True
+    parts = [part for part in path.split("/") if part]
+    return (
+        len(parts) == 4
+        and parts[0] == "api"
+        and parts[1] == "bills"
+        and parts[3] in {"vote", "endorse", "simulate-endorsements"}
+    )
+
+
+def reset_rate_limits() -> None:
+    """Drop the in-memory counters. Tests use this so cases stay independent."""
+    with _rate_lock:
+        _rate_hits.clear()
+
+
+def _client_ip(request: Request) -> str:
+    """The socket peer. X-Forwarded-For and X-Real-IP are not consulted."""
+    client = request.client
+    if client is None or not client.host:
+        return "unknown"
+    return client.host
+
+
+def _prune_rate_limits(now: float) -> None:
+    cutoff = now - RATE_WINDOW_SECONDS
+    expired = []
+    for ip, hits in _rate_hits.items():
+        hits[:] = [stamp for stamp in hits if stamp > cutoff]
+        if not hits:
+            expired.append(ip)
+    for ip in expired:
+        _rate_hits.pop(ip, None)
+
+
+def _rate_limited(request: Request) -> bool:
+    """Shared LAN limit: RATE_LIMIT spending posts per minute for one client IP.
+
+    The map keeps at most RATE_LIMIT_MAX_IPS addresses and drops the least
+    recently seen one past that. Expired timestamps are removed first.
+    """
+    ip = _client_ip(request)
+    now = time.monotonic()
+    with _rate_lock:
+        _prune_rate_limits(now)
+        hits = _rate_hits.get(ip)
+        if hits is None:
+            while len(_rate_hits) >= RATE_LIMIT_MAX_IPS:
+                _rate_hits.popitem(last=False)
+            hits = []
+            _rate_hits[ip] = hits
+        else:
+            _rate_hits.move_to_end(ip)
+        if len(hits) >= RATE_LIMIT:
+            return True
+        hits.append(now)
+        return False
+
+
+def _presented_token_ok(request: Request) -> bool:
+    """True only when the single X-Access-Token header matches, via compare_digest.
+
+    The query string is ignored. Zero headers, or more than one, does not match.
+    A token shorter than 16 characters is never accepted.
+    """
+    expected = configured_access_token()
+    if len(expected) < MIN_ACCESS_TOKEN_CHARS:
+        return False
+    presented = _raw_header_values(request, "x-access-token")
+    if len(presented) != 1:
+        return False
+    try:
+        got = presented[0].encode("utf-8")
+        want = expected.encode("utf-8")
+    except UnicodeError:
+        return False
+    return hmac.compare_digest(got, want)
+
+
+def _deny(status: int, detail: str, headers: dict[str, str] | None = None) -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=status, headers=headers)
+
+
+def guard_api_request(request: Request) -> JSONResponse | None:
+    """Block a bad request. None means the route may run.
+
+    Host is checked on every route, including pages, before Origin and before
+    the access token. Static pages, the manifest, icons, and sw.js still do
+    not need the token.
+    """
+    if not host_header_allowed(_raw_header_values(request, "host")):
+        return _deny(421, "Misdirected Request")
+    path = request.url.path
+    if path != "/api" and not path.startswith("/api/"):
+        return None
+    if access_token_required() and not _presented_token_ok(request):
+        # Same body for a missing header and a wrong header.
+        return _deny(401, "Unauthorized")
+    if request.method in _STATE_CHANGING and not _origin_allowed(request):
+        return _deny(403, "Forbidden")
+    expected = _expected_media_type(request.method, path)
+    if expected is not None:
+        types = _media_types(request)
+        if not types or any(media != expected for media in types):
+            return _deny(415, "Unsupported Media Type")
+    if access_token_required() and is_spending_request(request.method, path):
+        if _rate_limited(request):
+            return _deny(429, "Too Many Requests", {"Retry-After": str(int(RATE_WINDOW_SECONDS))})
+    return None
+
+
+def _with_security_headers(response: JSONResponse):
+    response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+    return response
+
+
 app = FastAPI(
     title="Bill Summarizer",
     description="Plain-language summaries and red-flag detection for legislative bills.",
@@ -56,6 +584,17 @@ app = FastAPI(
 # Serve frontend static files (CSS, JS) at /static/*
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+
+@app.middleware("http")
+async def reject_untrusted_api_requests(request: Request, call_next):
+    """Host allowlist, then token, origin, content type, and the LAN rate limit."""
+    blocked = guard_api_request(request)
+    if blocked is not None:
+        return _with_security_headers(blocked)
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+    return response
 
 
 class AnalyzeTextRequest(BaseModel):
@@ -719,12 +1258,21 @@ def resolve_bind_host(argv: list[str] | None = None) -> str:
 
 def main() -> None:
     """Entry point for `python main.py`."""
-    import sys
     import uvicorn
+
+    global bind_host, bind_port
 
     port = int(os.environ.get("PORT", "8000"))
     host = resolve_bind_host(sys.argv[1:])
+    # Token first, then the port, then the banner. A refused start prints neither
+    # the banner nor the listen line. The port check still exits before the banner.
+    ensure_access_token(host)
     ensure_port_available(host, port)
+    bind_host = host
+    bind_port = port
+
+    if not is_loopback_host(host):
+        print(format_lan_banner(host, port), file=sys.stderr, flush=True)
 
     print(f"Starting Bill Summarizer on http://{host}:{port}")
     print(f"LLM provider: {config.LLM_PROVIDER} (primary model {config.MODEL})")

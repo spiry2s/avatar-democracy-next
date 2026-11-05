@@ -2,9 +2,10 @@
    CACHE_VERSION: bump this string in a release so activate() deletes old caches.
    Caches HTML, CSS, JS, and icons only. Never caches /api or any analysis or vote response.
    Network-first for HTML (and the rest of the shell) so a new release shows while online.
+   install does not call skipWaiting. The page posts SKIP_WAITING when the user reloads.
    Service workers run only on https or localhost. */
 
-const CACHE_VERSION = "avatar-democracy-shell-v1";
+const CACHE_VERSION = "avatar-democracy-shell-v3";
 
 const SHELL_PATHS = [
   "/",
@@ -23,13 +24,34 @@ const SHELL_PATHS = [
   "/static/chamber.js",
   "/static/history.js",
   "/static/pwa.js",
+  "/static/api.js",
   "/static/icons/icon.svg",
   "/static/icons/icon-192.png",
   "/static/icons/icon-512.png",
   "/static/icons/icon-maskable-512.png",
 ];
 
+function canonicalPath(pathname) {
+  let decoded = pathname;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch (error) {
+    decoded = pathname;
+  }
+  const parts = [];
+  for (const part of decoded.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return "/" + parts.join("/");
+}
+
 function isApiPath(pathname) {
+  pathname = canonicalPath(pathname);
   return pathname === "/api" || pathname.startsWith("/api/");
 }
 
@@ -39,9 +61,7 @@ function isShellPath(pathname) {
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_VERSION)
-      .then((cache) => cache.addAll(SHELL_PATHS))
-      .then(() => self.skipWaiting())
+    caches.open(CACHE_VERSION).then((cache) => cache.addAll(SHELL_PATHS))
   );
 });
 
@@ -53,6 +73,11 @@ self.addEventListener("activate", (event) => {
       ))
       .then(() => self.clients.claim())
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "SKIP_WAITING") return;
+  self.skipWaiting();
 });
 
 self.addEventListener("fetch", (event) => {

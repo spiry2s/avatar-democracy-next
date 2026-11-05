@@ -1532,3 +1532,63 @@ table {
     --focus-ring: 0 0 0 3px rgba(143, 217, 210, 0.45);
   }
 }
+
+/* LAN access token. Shown only after an API call returns 401. */
+.access-token-prompt {
+  position: fixed;
+  z-index: 40;
+  left: max(16px, env(safe-area-inset-left, 0px));
+  right: max(16px, env(safe-area-inset-right, 0px));
+  bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  max-width: 28rem;
+  margin: 0 auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: var(--space-4);
+}
+
+.access-token-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.access-token-form label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  flex: 1 1 100%;
+}
+
+.access-token-form input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 16px;
+  padding: 10px 12px;
+}
+
+/* Service-worker update. A small control, not a dialog. */
+.sw-update {
+  position: fixed;
+  z-index: 40;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: max(12px, env(safe-area-inset-right, 0px));
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  padding: 8px 14px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sw-update:disabled { opacity: 0.45; cursor: not-allowed; }

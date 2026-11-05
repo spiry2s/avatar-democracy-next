@@ -109,7 +109,7 @@ analyzeBtn.addEventListener('click', async () => {
   setLoading(true);
 
   try {
-    const res = await fetch('/api/analyze', { method: 'POST', body: formData });
+    const res = await apiFetch('/api/analyze', { method: 'POST', body: formData });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -185,13 +185,11 @@ function renderResults(a, sourceChars) {
   if (a.sections && a.sections.length) {
     sectionsCount.textContent = a.sections.length;
     sectionsBody.innerHTML = a.sections.map(s => {
-      const sig = (s.significance || 'medium').toLowerCase();
-      const ungrounded = s.grounded === false ? ' claim-ungrounded' : '';
-      return `<div class="section-item${ungrounded}">
+      return `<div class="section-item${claimMark(s.grounded)}">
         <div class="section-header">
           <span class="section-id">${escHtml(s.section_id || '')}</span>
           <span class="section-heading">${escHtml(s.heading || '')}</span>
-          <span class="sig-badge sig-${sig}">${escHtml(s.significance || 'medium')}</span>
+          <span class="sig-badge ${allowClass(SIG_CLASSES, s.significance, 'sig-medium')}">${escHtml(s.significance || 'medium')}</span>
           ${groundBadge(s)}
         </div>
         <p>${escHtml(s.summary || '')}</p>
@@ -215,11 +213,9 @@ function renderResults(a, sourceChars) {
     );
     redFlagsCount.textContent = sorted.length;
     redFlagsBody.innerHTML = sorted.map(f => {
-      const sev = (f.severity || 'medium').toLowerCase();
-      const ungrounded = f.grounded === false ? ' claim-ungrounded' : '';
-      return `<div class="flag-item flag-${sev}${ungrounded}">
+      return `<div class="flag-item ${allowClass(FLAG_CLASSES, f.severity, 'flag-medium')}${claimMark(f.grounded)}">
         <div class="flag-header">
-          <span class="sig-badge sig-${sev}">${escHtml(f.severity || 'medium')}</span>
+          <span class="sig-badge ${allowClass(SIG_CLASSES, f.severity, 'sig-medium')}">${escHtml(f.severity || 'medium')}</span>
           <span class="flag-type">${escHtml(f.type || '')}</span>
           <span class="muted">in ${escHtml(f.section || '?')}</span>
           ${groundBadge(f)}
@@ -253,8 +249,7 @@ function renderResults(a, sourceChars) {
         const items = claims.filter(c => c.group === key);
         if (!items.length) continue;
         html += `<div><h4>${label}</h4><ul>${items.map(c => {
-          const ungrounded = c.grounded === false ? ' class="claim-ungrounded"' : '';
-          return `<li${ungrounded}>${groundBadge(c)} ${escHtml(c.claim || '')}${renderQuote(c)}</li>`;
+          return `<li class="${claimMark(c.grounded).trim()}">${groundBadge(c)} ${escHtml(c.claim || '')}${renderQuote(c)}</li>`;
         }).join('')}</ul></div>`;
       } else if (b[key]?.length) {
         html += `<div><h4>${label}</h4><ul>${b[key].map(x => `<li>${escHtml(x)}</li>`).join('')}</ul></div>`;
@@ -419,7 +414,7 @@ function flagList(title, rows, side) {
   return `<div class="compare-block"><h4>${escHtml(title)}</h4>${rows.map(flag => `<div class="compare-item">
     <div class="flag-header">
       <span class="compare-side">${escHtml(side)}</span>
-      <span class="sig-badge sig-${escHtml((flag.severity || 'medium').toLowerCase())}">${escHtml(flag.severity || 'medium')}</span>
+      <span class="sig-badge ${allowClass(SIG_CLASSES, flag.severity, 'sig-medium')}">${escHtml(flag.severity || 'medium')}</span>
       <span class="flag-type">${escHtml(flag.type || '')}</span>
       <span class="muted">in ${escHtml(flag.section || '?')}</span>
     </div>

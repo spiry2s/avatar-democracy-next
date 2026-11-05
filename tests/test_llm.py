@@ -337,7 +337,7 @@ def test_provider_value_error_is_not_unparseable_output(client, monkeypatch):
             )
 
     monkeypatch.setattr(llm, "get_provider", lambda role="primary": Boom())
-    response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    response = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert response.status_code == 500
     detail = response.json()["detail"]
     assert "Streaming is required" in detail
@@ -619,7 +619,7 @@ def test_detect_conflicts_requests_checker_role(monkeypatch):
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return TestClient(app, base_url="http://127.0.0.1:8000")
 
 
 def test_health_reports_configured_credential(client, monkeypatch):
@@ -645,7 +645,7 @@ def test_health_reports_configured_credential(client, monkeypatch):
 def test_analyze_missing_key_is_explicit_500(client, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
-    response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    response = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert response.status_code == 500
     detail = response.json()["detail"]
     assert "ANTHROPIC_API_KEY" in detail
@@ -655,7 +655,7 @@ def test_analyze_missing_key_is_explicit_500(client, monkeypatch):
 def test_analyze_unknown_provider_is_explicit_500(client, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(config, "LLM_PROVIDER", "gemini")
-    response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    response = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert response.status_code == 500
     detail = response.json()["detail"]
     assert "gemini" in detail
@@ -668,7 +668,7 @@ def test_analyze_endpoint_uses_provider_and_rejects_bad_json(client, monkeypatch
         "get_provider",
         lambda role="primary": FakeProvider([_json(ANALYSIS)]),
     )
-    response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    response = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
@@ -679,7 +679,7 @@ def test_analyze_endpoint_uses_provider_and_rejects_bad_json(client, monkeypatch
         "get_provider",
         lambda role="primary": FakeProvider(["not json"]),
     )
-    bad = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    bad = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert bad.status_code == 502
     assert "unparseable" in bad.json()["detail"].lower()
 
@@ -696,6 +696,6 @@ def test_analyze_provider_failure_is_explicit_500(client, monkeypatch):
             raise Upstream("upstream down")
 
     monkeypatch.setattr(llm, "get_provider", lambda role="primary": Boom())
-    response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    response = client.post("/api/analyze", files={"text": (None, "Section 1. " * 20)})
     assert response.status_code == 500
     assert "Analysis failed: upstream down" in response.json()["detail"]

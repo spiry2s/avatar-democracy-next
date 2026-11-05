@@ -24,8 +24,8 @@ let axisY = 'social';
 
 async function init() {
   const [p, prof] = await Promise.all([
-    fetch('/api/population').then(r => r.json()),
-    fetch('/api/profile').then(r => r.json()).catch(() => ({ profile: null })),
+    apiFetch('/api/population').then(r => r.json()),
+    apiFetch('/api/profile').then(r => r.json()).catch(() => ({ profile: null })),
   ]);
   dist = p;
   operatorCompass = prof.profile ? prof.profile.compass : null;
@@ -137,7 +137,7 @@ document.getElementById('regen-btn').addEventListener('click', async () => {
   btn.disabled = true;
   status.textContent = 'Regenerating…';
   try {
-    const res = await fetch('/api/population/regenerate', {
+    const res = await apiFetch('/api/population/regenerate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ size }),
     });

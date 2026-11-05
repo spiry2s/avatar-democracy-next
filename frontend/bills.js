@@ -49,7 +49,7 @@ proposeBtn.addEventListener('click', async () => {
   proposeBtn.disabled = true;
   proposeStatus.textContent = 'Proposing…';
   try {
-    const res = await fetch('/api/bills', {
+    const res = await apiFetch('/api/bills', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -76,7 +76,7 @@ proposeBtn.addEventListener('click', async () => {
 
 async function loadList() {
   try {
-    const data = await fetch('/api/bills').then(r => r.json());
+    const data = await apiFetch('/api/bills').then(r => r.json());
     renderList(data.bills || []);
   } catch (err) {
     billsList.innerHTML = `<p class="muted">Could not load bills: ${escHtml(err.message)}</p>`;
@@ -94,7 +94,7 @@ function renderList(bills) {
       : '';
     return `<div class="bill-card" data-id="${escHtml(b.id)}">
       <div class="bill-card-main">
-        <span class="state-badge state-${b.state}">${STATE_LABELS[b.state] || b.state}</span>
+        <span class="state-badge ${allowClass(STATE_CLASSES, b.state, 'state-draft')}">${escHtml(STATE_LABELS[b.state] || b.state || '')}</span>
         ${b.emergency ? '<span class="badge-emergency">⚡ Emergency</span>' : ''}
         <span class="bill-card-title">${escHtml(b.title)}</span>
         <span class="muted bill-card-scope">${escHtml(b.scope)}</span>
@@ -116,7 +116,7 @@ function resultLine(b) {
 function progressBar(current, total) {
   const pct = total > 0 ? Math.min(100, (current / total) * 100) : 0;
   return `<div class="progress">
-    <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+    <div class="progress-track"><div class="progress-fill" style="width:${cssPercent(pct)}"></div></div>
     <span class="progress-label">${current.toLocaleString()} / ${total.toLocaleString()}</span>
   </div>`;
 }
@@ -133,7 +133,7 @@ document.getElementById('back-btn').addEventListener('click', () => {
 
 async function openDetail(billId) {
   try {
-    const data = await fetch(`/api/bills/${billId}`).then(r => r.json());
+    const data = await apiFetch(`/api/bills/${billId}`).then(r => r.json());
     currentBill = data.bill;
     listView.classList.add('hidden');
     detailView.classList.remove('hidden');
@@ -146,7 +146,7 @@ async function openDetail(billId) {
 
 function renderDetail(b) {
   document.getElementById('detail-eyebrow').innerHTML =
-    `<span class="state-badge state-${b.state}">${STATE_LABELS[b.state] || b.state}</span> · ${escHtml(b.scope)}`
+    `<span class="state-badge ${allowClass(STATE_CLASSES, b.state, 'state-draft')}">${escHtml(STATE_LABELS[b.state] || b.state || '')}</span> · ${escHtml(b.scope)}`
     + (b.emergency ? ' · <span class="badge-emergency">⚡ Emergency</span>' : '');
   document.getElementById('detail-title').textContent = b.title;
 
@@ -204,7 +204,7 @@ function endorsingPanel(b) {
       </div>
       <div class="sim-control">
         <span class="muted">Demo — simulate other citizens:</span>
-        <input type="number" id="sim-count" class="title-field sim-input" value="${remaining || 10}" min="1">
+        <input type="number" id="sim-count" class="title-field sim-input" value="${htmlNumber(remaining || 10)}" min="1">
         <button class="btn-secondary" id="sim-btn">Add simulated endorsements</button>
       </div>
     </div></div>`;
@@ -237,12 +237,11 @@ function votingPanel(b) {
 function chamberBar(t) {
   const total = (t.yes || 0) + (t.no || 0) + (t.abstain || 0);
   if (!total) return '';
-  const pct = n => `${(n / total * 100).toFixed(1)}%`;
   return `<div class="chamber">
     <div class="chamber-bar">
-      <div class="cb-seg cb-yes" style="width:${pct(t.yes)}"></div>
-      <div class="cb-seg cb-no" style="width:${pct(t.no)}"></div>
-      <div class="cb-seg cb-abstain" style="width:${pct(t.abstain)}"></div>
+      <div class="cb-seg cb-yes" style="width:${cssPercent(t.yes / total * 100)}"></div>
+      <div class="cb-seg cb-no" style="width:${cssPercent(t.no / total * 100)}"></div>
+      <div class="cb-seg cb-abstain" style="width:${cssPercent(t.abstain / total * 100)}"></div>
     </div>
     <div class="chamber-counts">
       <span class="cb-yes-t">${(t.yes || 0).toLocaleString()} yes</span>
@@ -259,15 +258,14 @@ function blocBreakdown(byArch) {
     const t = byArch[k];
     const tot = (t.yes || 0) + (t.no || 0) + (t.abstain || 0);
     if (!tot) return '';
-    const pct = n => `${(n / tot * 100).toFixed(0)}%`;
     const a = ARCH[k];
     return `<div class="bloc-row">
-      <span class="arch-swatch" style="background:${a.c}"></span>
+      <span class="arch-swatch" style="background:${cssColor(a.c)}"></span>
       <span class="bloc-name">${a.label}</span>
       <div class="chamber-bar bloc-bar">
-        <div class="cb-seg cb-yes" style="width:${pct(t.yes)}"></div>
-        <div class="cb-seg cb-no" style="width:${pct(t.no)}"></div>
-        <div class="cb-seg cb-abstain" style="width:${pct(t.abstain)}"></div>
+        <div class="cb-seg cb-yes" style="width:${cssPercent(t.yes / tot * 100)}"></div>
+        <div class="cb-seg cb-no" style="width:${cssPercent(t.no / tot * 100)}"></div>
+        <div class="cb-seg cb-abstain" style="width:${cssPercent(t.abstain / tot * 100)}"></div>
       </div>
       <span class="bloc-count">${t.yes || 0}y / ${t.no || 0}n</span>
     </div>`;
@@ -289,9 +287,8 @@ function resultPanel(b) {
     const noContest = t.contested === false;
     const passBadge = noContest
       ? `<span class="sig-badge sig-medium">no contest</span>`
-      : `<span class="sig-badge ${t.passed ? 'sig-low' : 'sig-high'}">${t.passed ? 'section passes' : 'section fails'}</span>`;
-    const itemClass = noContest ? 'vote-abstain' : (t.passed ? 'vote-yes' : 'vote-no');
-    return `<div class="vote-item ${itemClass}">
+      : `<span class="sig-badge ${passedClass(t.passed)}">${t.passed ? 'section passes' : 'section fails'}</span>`;
+    return `<div class="vote-item ${voteOutcomeClass(noContest, t.passed)}">
       <div class="vote-header">
         <span class="section-id">${escHtml(t.section_id)}</span>
         <span class="section-heading">${escHtml(t.heading || sv.heading || '')}</span>
@@ -303,7 +300,7 @@ function resultPanel(b) {
       ${sv.comparison_abstained ? `<div class="diverge-line"><span class="badge-review">⚠ models disagree — abstained</span> ${escHtml(sv.comparison_note || '')}</div>` : ''}
       ${sv.needs_human_review ? `<div class="diverge-line"><span class="badge-review">⚠ human review</span> ${escHtml(sv.comparison_note || '')}</div>` : ''}
       ${sv.delegate_drift ? `<div class="diverge-line"><span class="badge-drift">⚠ delegate drift</span> this vote contradicts the delegate's recorded positions — review before trusting it</div>` : ''}
-      ${sv.reasoning ? `<p class="vote-reasoning"><span class="op-tag pos-${pos}">your Avatar: ${escHtml(sv.position)}</span>${escHtml(sv.reasoning)}</p>` : ''}
+      ${sv.reasoning ? `<p class="vote-reasoning"><span class="op-tag ${allowClass(POS_CLASSES, pos, 'pos-abstain')}">your Avatar: ${escHtml(sv.position)}</span>${escHtml(sv.reasoning)}</p>` : ''}
       ${sv.basis ? `<div class="vote-footer"><span class="vote-basis">${formatBasis(sv.basis)}</span></div>` : ''}
     </div>`;
   }).join('');
@@ -311,7 +308,7 @@ function resultPanel(b) {
   return `<div class="result-card">
     <div class="result-card-header">
       <h3>Chamber outcome</h3>
-      <span class="state-badge state-${b.state}">${STATE_LABELS[b.state]}</span>
+      <span class="state-badge ${allowClass(STATE_CLASSES, b.state, 'state-draft')}">${escHtml(STATE_LABELS[b.state] || '')}</span>
     </div>
     <div class="result-card-body">
       <p><strong>${r.sections_passed} of ${r.sections_contested ?? r.sections_total} contested sections passed</strong>${pop ? ` across a Proxy Chamber of ${pop.toLocaleString()} Avatars` : ''}. A bill passes only if every contested section passes (no Christmas-tree bills); procedural sections everyone abstains on are "no contest".</p>
@@ -369,7 +366,7 @@ async function action(url, method, body, isVote) {
   try {
     const opts = { method };
     if (body) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
-    const res = await fetch(url, opts);
+    const res = await apiFetch(url, opts);
     if (!res.ok) throw new Error((await res.json()).detail || `${method} ${url} failed`);
     const data = await res.json();
     currentBill = data.bill;

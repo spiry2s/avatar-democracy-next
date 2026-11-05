@@ -15,7 +15,7 @@ import main
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
-CLIENT = TestClient(main.app)
+CLIENT = TestClient(main.app, base_url="http://127.0.0.1:8000")
 PAGES = sorted(FRONTEND.glob("*.html"))
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 

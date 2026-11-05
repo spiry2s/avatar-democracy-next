@@ -19,7 +19,7 @@ let currentVote = null;
 
 // ── Check profile exists ──────────────────────────────────────────────────────
 
-fetch('/api/profile').then(r => r.json()).then(d => {
+apiFetch('/api/profile').then(r => r.json()).then(d => {
   if (!d.profile) document.getElementById('no-profile-banner').classList.remove('hidden');
 });
 
@@ -81,13 +81,13 @@ voteBtn.addEventListener('click', async () => {
     if (activeTab === 'upload') fd.append('file', selectedFile);
     else fd.append('text', textInput.value.trim());
 
-    const aRes = await fetch('/api/analyze', { method: 'POST', body: fd });
+    const aRes = await apiFetch('/api/analyze', { method: 'POST', body: fd });
     if (!aRes.ok) throw new Error((await aRes.json()).detail || `Analyze failed (HTTP ${aRes.status})`);
     const analysis = (await aRes.json()).analysis;
 
     // Step 2: vote
     setStatus(true, 'Your Avatar is voting…', 'Applying your delegates, values, and compass to each section.');
-    const vRes = await fetch('/api/avatar/vote', {
+    const vRes = await apiFetch('/api/avatar/vote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ analysis }),
@@ -171,9 +171,9 @@ function renderSection(v, idx) {
   const modelNote = v.model_position && v.model_position !== v.position
     ? `<p class="muted">Model output was ${escHtml(v.model_position)} and was not used.</p>`
     : '';
-  return `<div class="vote-item vote-${pos}" id="vote-${idx}">
+  return `<div class="vote-item ${allowClass(VOTE_CLASSES, pos, 'vote-abstain')}" id="${voteDomId(idx)}">
     <div class="vote-header">
-      <span class="vote-position pos-${pos}">${escHtml(v.position)}</span>
+      <span class="vote-position ${allowClass(POS_CLASSES, pos, 'pos-abstain')}">${escHtml(v.position)}</span>
       <span class="section-id">${escHtml(v.section_id)}</span>
       <span class="section-heading">${escHtml(v.heading)}</span>
       ${overridden}
@@ -188,11 +188,11 @@ function renderSection(v, idx) {
     ${review}
     <div class="vote-footer">
       <span class="vote-basis">${basisLabel}</span>
-      <span class="sig-badge sig-${conf(v.confidence)}">confidence: ${escHtml(v.confidence)}</span>
+      <span class="sig-badge ${allowClass(CONFIDENCE_CLASSES, v.confidence, 'sig-medium')}">confidence: ${escHtml(v.confidence)}</span>
       <div class="override-group">
         <span class="muted">Override:</span>
         ${['yes', 'no', 'abstain'].map(p =>
-          `<button class="override-opt ${pos === p ? 'current' : ''}" data-idx="${idx}" data-pos="${p}">${p}</button>`
+          `<button class="override-opt ${currentClass(pos, p)}" data-idx="${domIndex(idx)}" data-pos="${allowClass(VOTE_VALUES, p, 'abstain')}">${allowClass(VOTE_VALUES, p, 'abstain')}</button>`
         ).join('')}
       </div>
     </div>
@@ -226,9 +226,6 @@ function formatBasis(basis) {
   return escHtml(basis);
 }
 
-function conf(c) {
-  return c === 'high' ? 'low' : c === 'low' ? 'high' : 'medium'; // green=high confidence, red=low
-}
 
 async function override(idx, position) {
   const v = currentVote.section_votes[idx];
@@ -236,7 +233,7 @@ async function override(idx, position) {
   if (previous === position) return;
 
   try {
-    await fetch('/api/avatar/override', {
+    await apiFetch('/api/avatar/override', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

@@ -17,8 +17,8 @@ const saveStatus = document.getElementById('save-status');
 
 async function init() {
   const [qRes, pRes] = await Promise.all([
-    fetch('/api/questionnaire').then(r => r.json()),
-    fetch('/api/profile').then(r => r.json()),
+    apiFetch('/api/questionnaire').then(r => r.json()),
+    apiFetch('/api/profile').then(r => r.json()),
   ]);
   questionnaire = qRes;
   profile = pRes.profile;
@@ -79,7 +79,7 @@ saveBtn.addEventListener('click', async () => {
   saveBtn.disabled = true;
   saveStatus.textContent = 'Saving…';
   try {
-    const res = await fetch('/api/profile', {
+    const res = await apiFetch('/api/profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ questionnaire_answers: answers, values: valuesInput.value }),
@@ -112,7 +112,7 @@ document.getElementById('del-add').addEventListener('click', async () => {
     return;
   }
   try {
-    const res = await fetch('/api/profile/delegates', {
+    const res = await apiFetch('/api/profile/delegates', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ issue_area: issue, name, note }),
@@ -132,7 +132,7 @@ document.getElementById('del-add').addEventListener('click', async () => {
 async function revokeDelegate(issue) {
   if (!confirm(`Revoke your delegate for "${issue}"? This takes effect immediately.`)) return;
   try {
-    const res = await fetch(`/api/profile/delegates/${encodeURIComponent(issue)}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/profile/delegates/${encodeURIComponent(issue)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error((await res.json()).detail || 'Revoke failed');
     profile = (await res.json()).profile;
     renderDelegates();
@@ -196,7 +196,7 @@ function renderDelegates() {
 async function addSource(issue, title, text) {
   if (!text.trim()) { saveStatus.textContent = 'Source text is required.'; return; }
   try {
-    const res = await fetch(`/api/profile/delegates/${encodeURIComponent(issue)}/sources`, {
+    const res = await apiFetch(`/api/profile/delegates/${encodeURIComponent(issue)}/sources`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, text }),
     });
@@ -208,7 +208,7 @@ async function addSource(issue, title, text) {
 
 async function removeSource(issue, srcId) {
   try {
-    const res = await fetch(`/api/profile/delegates/${encodeURIComponent(issue)}/sources/${encodeURIComponent(srcId)}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/profile/delegates/${encodeURIComponent(issue)}/sources/${encodeURIComponent(srcId)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error((await res.json()).detail || 'Remove failed');
     profile = (await res.json()).profile;
     renderDelegates();

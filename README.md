@@ -67,7 +67,7 @@ uvicorn main:app --host 127.0.0.1 --port 8000
 
 `Start Avatar Democracy.bat` starts `python main.py` on Windows and sets the cooling-off timers to `0`, so a new delegate and a frozen bill can advance immediately.
 
-`HOST` defaults to `127.0.0.1`. `PORT` defaults to `8000`. If that port is already in use, the process prints an error naming `PORT` and exits before the startup banner.
+`HOST` defaults to `127.0.0.1`. `PORT` defaults to `8000`. If that port is already in use, the process prints an error naming `PORT` and exits before the startup banner. Binding anything other than `127.0.0.1`, `::1`, or `localhost` also exits before that banner unless `APP_ACCESS_TOKEN` is set to at least 16 characters. See Use on your phone.
 
 `sample_bill.txt` is a short fictional bill you can paste on `/analyze`. Analysis and voting stay unavailable until `ANTHROPIC_API_KEY` is set.
 
@@ -87,17 +87,19 @@ The pages fit a phone, and the app can be added to the home screen.
 
 On iPhone, open the app in Safari, tap Share, then Add to Home Screen. On Android, open it in Chrome, open the browser menu, then Add to Home screen or Install app. The icon then opens the app on its own, without the browser toolbar.
 
-The default stays bound to localhost (`127.0.0.1`). A phone cannot open that address. To reach this computer from a phone on the same Wi-Fi, opt in:
+The default stays bound to localhost (`127.0.0.1`). A phone cannot open that address. To reach this computer from a phone on the same Wi-Fi, opt in with a shared access token:
 
 ```bash
-python main.py --host 0.0.0.0
+APP_ACCESS_TOKEN='paste-a-long-random-token' python main.py --host 0.0.0.0
 ```
 
-`HOST=0.0.0.0` does the same thing. If both are set, `--host` wins. Then open `http://<this-computer-lan-ip>:8000` on the phone (`PORT` is still `8000` unless you change it).
+Generate a token with `python3 -c "import secrets;print(secrets.token_urlsafe(24))"`. `APP_ACCESS_TOKEN` must be at least 16 characters. `HOST=0.0.0.0` does the same thing as `--host`. If both are set, `--host` wins. The process refuses to start on any bind address other than `127.0.0.1`, `::1`, or `localhost` until that token is set. Then open `http://<this-computer-lan-ip>:8000` on the phone (`PORT` is still `8000` unless you change it). The phone asks for the token once and keeps it in local storage. Pages, the manifest, icons, and `sw.js` load without it. Every `/api` call sends it in the `X-Access-Token` header. Putting the token in the URL does not work.
 
-This exposes the app, and any configured API key, to anyone on that network. Analysis and votes spend that key. Use it only on a trusted network, never on public or shared Wi-Fi. It is still the local process on your machine.
+Loopback does not ask for a token. It is protected by a Host allowlist and the same Origin check, not by "this request's Host matches its Origin". A browser can DNS-rebind a name it controls onto `127.0.0.1` and then send that name as both `Host` and `Origin`. Those requests are rejected. The allowlist is `127.0.0.1`, `localhost`, and `[::1]`, with the bound port or with no port. A LAN bind also allows the address you bound, each interface address when you bind `0.0.0.0` or `::`, and this machine's hostname. `ALLOWED_HOSTS` is an optional comma-separated list of extra names. `X-Forwarded-Host` is ignored. Anyone else on the same machine can still open the loopback address and use the app.
 
-A service worker caches only the static shell (pages, CSS, scripts, and icons) and only when the page is served over https or from localhost. It does not cache `/api` or any analysis or vote response, and it asks the network for HTML first so a new release shows up. Over plain `http://` on a LAN address the pages and the home-screen icon still work; the worker simply does not install.
+**Use this only on a trusted private Wi-Fi network. Never use it on public or shared Wi-Fi.** Anyone on that network who has the token can run analyses and votes, and that spends your configured API keys. Analysing an untrusted bill file still sends its text to the model providers. The token is a shared password for this process, not an account system, and it does not make a public network safe. Press Ctrl+C in the terminal to stop. It is still the local process on your machine.
+
+A service worker caches only the static shell (pages, CSS, scripts, and icons) and only when the page is served over https or from localhost. It does not cache `/api` or any analysis or vote response, and it asks the network for HTML first so a new release shows up. When a new shell is waiting, the page offers a reload. Over plain `http://` on a LAN address the pages and the home-screen icon still work; the worker simply does not install.
 
 ## Run the tests
 
@@ -151,6 +153,8 @@ Optional. Defaults live in `backend/config.py` and `backend/profile.py`. Copy `.
 | `SECTION_PASSAGE_RATIO` | `0.5` | `yes / (yes + no)` required for a contested section |
 | `CHAMBER_VOTE_TAU` | `0.12` | Compass alignment below this abstains |
 | `HOST` | `127.0.0.1` | Bind address. `python main.py --host` overrides it. Default stays localhost |
+| `APP_ACCESS_TOKEN` | unset | Required when the bind address is not `127.0.0.1`, `::1`, or `localhost`. At least 16 characters. The browser sends it as `X-Access-Token`. Loopback does not use a token; Host and Origin checks still apply, and anyone else on the same machine can reach it |
+| `ALLOWED_HOSTS` | unset | Optional comma-separated host names added to the Host and Origin allowlist. `*` is not a wildcard |
 | `PORT` | `8000` | Bind port |
 
 `MULTI_MODEL_CHECK`, `DELEGATE_DRIFT_CHECK`, and `CROSS_BILL_CONFLICT_CHECK` turn off when set to `0`, `false`, or an empty string. `COMPARISON_VOTE_POLICY` accepts `abstain` or `review`. Anything else is treated as `abstain`.
@@ -266,7 +270,8 @@ avatar-democracy/
 │   ├── bills.js
 │   ├── chamber.js
 │   ├── history.js
-│   ├── pwa.js                 # Registers the static-shell service worker
+│   ├── api.js                 # Shared /api fetch. Sends the stored access token
+│   ├── pwa.js                 # Registers the worker and offers a reload
 │   ├── sw.js                  # Caches the shell only; never /api
 │   ├── manifest.webmanifest
 │   └── icons/                 # Home-screen mark, from the same bars as docs/site/favicon.svg
@@ -283,7 +288,8 @@ avatar-democracy/
 │   ├── test_injection.py        # Fences, schema, quote checks, truncation, no network
 │   ├── test_llm.py              # Fake-provider coverage of every model call site
 │   ├── test_comparison.py       # OpenAI-compatible HTTP shape, disagreement, vote policy
-│   └── test_mobile.py           # Manifest, icons, viewport, service worker, bind host
+│   ├── test_mobile.py           # Manifest, icons, viewport, service worker, bind host
+│   └── test_lan_access.py       # LAN token, origin check, content type, banner
 ├── ai_avatar_democracy_v1.1.md  # Current white paper
 ├── CHANGES-v1.1.md              # Changes since v1.0
 ├── ai_avatar_democracy_v1.0.md  # Kept for history

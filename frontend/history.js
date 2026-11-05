@@ -25,7 +25,7 @@ const LABELS = {
 async function load() {
   auditBody.innerHTML = '<p class="muted">Loading…</p>';
   try {
-    const data = await fetch('/api/audit').then(r => r.json());
+    const data = await apiFetch('/api/audit').then(r => r.json());
     render(data.events || []);
   } catch (err) {
     auditBody.innerHTML = `<p class="muted">Could not load audit log: ${escHtml(err.message)}</p>`;
