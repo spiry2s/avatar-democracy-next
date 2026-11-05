@@ -109,10 +109,19 @@ MULTI_MODEL_CHECK = os.environ.get("MULTI_MODEL_CHECK", "1") not in ("0", "false
 # Independent-family comparison of the bill analysis. Unset means off, and
 # analysis behaves as before. COMPARISON_MODEL is required when this is set;
 # it is never taken from AVATAR_MODEL.
-# COMPARISON_VOTE_POLICY=abstain (default): a high-severity red-flag
-# disagreement makes the Avatar abstain on that section.
-# COMPARISON_VOTE_POLICY=review: keep the primary position and flag the
-# section for human review. Neither mode lets one model silently win.
+# COMPARISON_VOTE_POLICY=abstain (default, and the safe setting): a
+# high-severity red-flag disagreement makes the Avatar abstain on that section.
+# If the comparison is unavailable, abstain makes the Avatar abstain.
+# COMPARISON_VOTE_POLICY=review is for demos only. It does not always keep the
+# primary position. If the comparison is unavailable and that section has no
+# high-severity primary flag, review keeps the primary yes or no and sets
+# needs_human_review. That yes or no is excluded from the automatic yes/no
+# tallies. If the comparison is unavailable and that section has a
+# high-severity primary flag, review abstains. Excluding a flagged yes or no
+# shrinks the denominator, so anyone who can make the comparison model
+# unavailable (a broken key, an outage, a blocked network, a timeout) for
+# chosen sections could shift which votes count and flip a 50% passage result.
+# Neither mode lets one model silently win.
 COMPARISON_PROVIDER = _provider_id(os.environ.get("COMPARISON_PROVIDER"), "")
 COMPARISON_MODEL = (os.environ.get("COMPARISON_MODEL") or "").strip()
 _COMPARISON_POLICY = (os.environ.get("COMPARISON_VOTE_POLICY") or "abstain").strip().lower()

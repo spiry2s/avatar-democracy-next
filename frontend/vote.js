@@ -148,7 +148,7 @@ function renderTally(vote) {
     counts[v.position] = (counts[v.position] || 0) + 1;
   });
   const review = counts.needs_human_review
-    ? `<span class="tally-pill badge-review">${counts.needs_human_review} needs human review</span>`
+    ? `<span class="tally-pill badge-review">${counts.needs_human_review} needs human review (excluded from yes/no)</span>`
     : '';
   document.getElementById('tally').innerHTML = `
     <span class="tally-pill tally-yes">${counts.yes} yes</span>

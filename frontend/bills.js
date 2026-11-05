@@ -248,7 +248,7 @@ function chamberBar(t) {
       <span class="cb-yes-t">${(t.yes || 0).toLocaleString()} yes</span>
       <span class="cb-no-t">${(t.no || 0).toLocaleString()} no</span>
       <span class="muted">${(t.abstain || 0).toLocaleString()} abstain</span>
-      ${(t.needs_human_review || 0) ? `<span class="badge-review">${Number(t.needs_human_review).toLocaleString()} needs human review</span>` : ''}
+      ${(t.needs_human_review || 0) ? `<span class="badge-review">${Number(t.needs_human_review).toLocaleString()} needs human review (excluded from yes/no)</span>` : ''}
     </div>
   </div>`;
 }

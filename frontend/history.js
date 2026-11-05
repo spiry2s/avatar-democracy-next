@@ -58,7 +58,7 @@ function detail(e) {
     case 'vote_cast': {
       const review = Number(d.needs_human_review) || 0;
       const reviewText = review
-        ? `, <span class="badge-review">${review} needs human review</span>`
+        ? `, <span class="badge-review">${review} needs human review (excluded from yes/no)</span>`
         : '';
       return `<strong>${escHtml(d.bill_title || 'a bill')}</strong> — ${d.sections} sections · `
         + `${d.yes} yes, ${d.no} no, ${d.abstain} abstain${reviewText}`;

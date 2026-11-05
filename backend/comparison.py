@@ -1253,13 +1253,15 @@ def apply_vote_policy(section_votes: list[Any], analysis: dict[str, Any]) -> set
     the analysis has no comparison report, so a vote with the checker role
     alone is unchanged.
 
-    `abstain` (default) replaces the position. `review` keeps the primary
-    position and marks `needs_human_review` when the section has no primary
-    high-severity flag. A needs_human_review yes or no is not a clean automatic
-    vote: the chamber tally counts it separately. If the comparison is
-    unavailable and the primary already raised a high-severity flag on the
-    section, the vote abstains instead of staying a flagged yes. Abstain is
-    the conservative default.
+    `review` is for demos only. Abstain is the safe setting. If the comparison
+    is unavailable: (a) default `abstain` makes the Avatar abstain; (b) `review`
+    with no high-severity primary flag on that section keeps the primary yes or
+    no marked needs_human_review=true, which is excluded from the automatic
+    yes/no tallies; (c) `review` with a high-severity primary flag on that
+    section abstains. `review` does not always keep the primary position.
+    On a high-severity disagreement, `abstain` replaces the position and
+    `review` keeps the primary yes or no only as a needs_human_review flag,
+    which is still excluded from the automatic yes/no tallies.
     """
     report = analysis.get("model_comparison") if isinstance(analysis, dict) else None
     if not isinstance(report, dict) or not report.get("enabled"):
