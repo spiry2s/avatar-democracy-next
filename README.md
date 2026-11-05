@@ -81,7 +81,7 @@ DELEGATE_COOLING_OFF_SECONDS=0
 EMERGENCY_COOLING_OFF_SECONDS=0
 ```
 
-The process writes runtime state under `data/` (gitignored): `profile.json`, one JSON file per bill, `audit.jsonl`, and `population.json`.
+The process writes runtime state under `data/` (gitignored): `profile.json`, one JSON file per bill, `audit.jsonl`, and `population.json`. Invite tokens, when you create them, are stored in that same directory. See Closed demo (invite tokens).
 
 ## Use on your phone
 
@@ -102,6 +102,41 @@ Loopback does not ask for a token. It is protected by a Host allowlist and the s
 **Use this only on a trusted private Wi-Fi network. Never use it on public or shared Wi-Fi.** Anyone on that network who has the token can run analyses and votes, and that spends your configured API keys. Analysing an untrusted bill file still sends its text to the model providers. The token is a shared password for this process, not an account system, and it does not make a public network safe. Press Ctrl+C in the terminal to stop. It is still the local process on your machine.
 
 A service worker caches only the static shell (pages, CSS, scripts, and icons) and only when the page is served over https or from localhost. It does not cache `/api` or any analysis or vote response, and it asks the network for HTML first so a new release shows up. When a new shell is waiting, the page offers a reload. Over plain `http://` on a LAN address the pages and the home-screen icon still work; the worker simply does not install.
+
+## Closed demo (invite tokens)
+
+`AVATAR_INVITE_MODE=1` closes the app for a small group of testers. Each tester gets a link. The provider API key stays in the server environment (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`). Testers never see it, and no page asks them to paste it.
+
+```bash
+python -m backend.invites create --label ada
+AVATAR_INVITE_MODE=1 python main.py
+```
+
+`create` prints a link like `http://127.0.0.1:8000/?token=...` once. The token is `secrets.token_urlsafe(32)` (32 bytes from the operating system). The server stores only an HMAC-SHA256 of it, plus a label, `created_at`, `expires_at`, a revoked flag, budgets, and usage counters. The store is `invites.sqlite` under `AVATAR_INVITE_DATA_DIR` (default `data/`, gitignored), next to `invite-hmac.key`. A path that contains `..`, or a relative path that resolves outside the project through a symlink, is rejected.
+
+Opening the link sets an `HttpOnly` cookie named `avatar_invite`, `SameSite=Strict`, and `Secure` when the request is https. The response is a redirect to the same path without `token`, so the secret is not left in the address bar. A missing, unknown, expired, or revoked token gets the same 403 page, with no reason. Static files under `/static/`, the manifest, and `sw.js` load without the cookie. Every other page and every `/api` route requires it. `python -m backend.invites` is the only admin interface. It is not mounted on the app. There is no invite route that creates, lists, or revokes tokens.
+
+```bash
+python -m backend.invites list
+python -m backend.invites usage
+python -m backend.invites revoke <id>
+python -m backend.invites extend <id> --hours 48
+python -m backend.invites expire <id>
+```
+
+`list` and `usage` show ids, labels, expiry, and counters, including daily bill usage for the current UTC day. They do not print token values. `revoke` keeps the row and rejects the cookie from then on. `expire` moves `expires_at` into the past. `extend` pushes expiry forward and does not clear a revoke.
+
+Defaults are 30 bills in total (`AVATAR_INVITE_BILL_BUDGET`), 10 of those per UTC day (`AVATAR_INVITE_BILL_DAILY`), 60 model-call credits (`AVATAR_INVITE_LLM_BUDGET`), and 14 days (`AVATAR_INVITE_TTL_HOURS=336`). `--bills` overrides the lifetime bill cap for one invite. `--bills-daily` overrides that invite's daily cap. `--calls` overrides the model-call credit. The model-call budget stays a separate safety net. `0` is a real budget on the command line. A blank or non-positive environment value keeps the default.
+
+The daily bill count is the UTC calendar day, `YYYY-MM-DD`. It resets at 00:00 UTC. `list` and `usage` show zero for today once that date has changed, even before the next analyze. The stored counter is cleared in the same transaction as the next bill reservation.
+
+Those credits are reserved in the same gate as the shared per-IP spending limit, and only for the routes that limit already covers. `POST /api/analyze` — pasted text, an uploaded file, or an official bill URL — reserves one bill against both the lifetime cap and the UTC-day cap, plus one model-call credit, or two model-call credits when `COMPARISON_PROVIDER` is set (that request also runs the comparison pass). Both bill counters move in that one SQLite transaction, or neither does. `POST /api/avatar/vote`, `POST /api/bills/{id}/vote`, `POST /api/bills/{id}/endorse`, and `POST /api/bills/{id}/simulate-endorsements` each reserve one model-call credit and do not touch the bill counters. The reserve happens when the request is admitted, including when the handler later returns 400 or 404. A request rejected for Host, Origin, or content type is not charged. The per-IP limit is checked first; a hit there is `Too Many Requests` with `Retry-After` and does not spend invite credit. Past the lifetime bill cap, analyze returns 429 with `Invite bill budget exhausted`. Past the daily cap, while lifetime credit remains, it returns 429 with `Invite daily bill limit reached. It resets at UTC midnight.` Past the model-call credit, the route returns 429 with `Invite model-call budget exhausted`. If the lifetime cap is already used up, that is the response even when the daily cap is also used up.
+
+Each admitted request is appended to `invite-usage.jsonl` in the data directory: invite id, label, route, timestamp, status, and, when a model call reported them, the call count and token total. The line does not include the raw token, the query string, or the API key. Counts in that log can be higher than the one credit the route reserved.
+
+Invite mode does not replace the LAN controls. The Host allowlist, the Origin check, the content-type check, the content security policy, and the refusal to listen beyond loopback without `APP_ACCESS_TOKEN` all stay. On loopback, the invite cookie is the tester gate and `X-Access-Token` is not required. On any other bind, `/api` still requires that shared LAN token as well as the invite cookie, and the per-IP limit still applies. The browser field labelled "Enter access token" is the LAN token. It is not a provider key and it is not the invite.
+
+One admitted vote, endorsement, or simulated endorsement can still perform more than one provider call (a checker pass, a drift check, axis tags, a schema retry, or analysis when a bill freezes). The credit stops further spending requests. It does not meter each of those inner calls. Set the budgets for the number of requests you want each tester to start, not for the number of provider round trips inside one request.
 
 ## Paste a bill link
 
@@ -184,7 +219,14 @@ Optional. Defaults live in `backend/config.py` and `backend/profile.py`. Copy `.
 | `SECTION_PASSAGE_RATIO` | `0.5` | `yes / (yes + no)` required for a contested section |
 | `CHAMBER_VOTE_TAU` | `0.12` | Compass alignment below this abstains |
 | `HOST` | `127.0.0.1` | Bind address. `python main.py --host` overrides it. Default stays localhost |
-| `APP_ACCESS_TOKEN` | unset | Required when the bind address is not `127.0.0.1`, `::1`, or `localhost`. At least 16 characters. The browser sends it as `X-Access-Token`. Loopback does not use a token; Host and Origin checks still apply, and anyone else on the same machine can reach it |
+| `APP_ACCESS_TOKEN` | unset | Required when the bind address is not `127.0.0.1`, `::1`, or `localhost`. At least 16 characters. The browser sends it as `X-Access-Token`. Loopback does not use a token; Host and Origin checks still apply, and anyone else on the same machine can reach it. Invite mode does not remove this requirement |
+| `AVATAR_INVITE_MODE` | unset | `1` (also `true`, `yes`, `on`) requires an invite cookie on every page and `/api` route except static files and the token landing. See Closed demo (invite tokens) |
+| `AVATAR_INVITE_DATA_DIR` | `data` | Directory for `invites.sqlite`, `invite-hmac.key`, and `invite-usage.jsonl`. Keep it gitignored. A `..` segment is rejected |
+| `AVATAR_INVITE_BILL_BUDGET` | `30` | Lifetime analyze requests each new invite may start. `create --bills` overrides it, including `0` |
+| `AVATAR_INVITE_BILL_DAILY` | `10` | Analyze requests per invite on one UTC calendar day. Resets at 00:00 UTC. `create --bills-daily` overrides it, including `0` |
+| `AVATAR_INVITE_LLM_BUDGET` | `60` | Model-call credits for each new invite, separate from the bill caps. `create --calls` overrides it |
+| `AVATAR_INVITE_TTL_HOURS` | `336` | Default lifetime of a new invite (14 days) |
+| `AVATAR_INVITE_BASE_URL` | `http://127.0.0.1:8000` | Base used when `create` prints the one-time link |
 | `ALLOWED_HOSTS` | unset | Optional comma-separated host names added to the Host and Origin allowlist. `*` is not a wildcard |
 | `PORT` | `8000` | Bind port |
 
@@ -286,7 +328,8 @@ avatar-democracy/
 │   ├── population.py            # Synthetic citizens
 │   ├── conflict.py              # Cross-bill conflict check
 │   ├── audit.py                 # Append-only JSONL log
-│   └── config.py                # Environment-backed settings
+│   ├── config.py                # Environment-backed settings
+│   └── invites.py               # Invite tokens, budgets, usage log, admin CLI
 ├── frontend/                    # Pages and scripts served by main.py
 │   ├── index.html
 │   ├── analyze.html
@@ -324,7 +367,8 @@ avatar-democracy/
 │   ├── test_comparison.py       # OpenAI-compatible HTTP shape, disagreement, vote policy
 │   ├── test_mobile.py           # Manifest, icons, viewport, service worker, bind host
 │   ├── test_lan_access.py       # LAN token, origin check, content type, banner
-│   └── test_bill_fetch.py       # Official bill links, SSRF checks, no live network
+│   ├── test_bill_fetch.py       # Official bill links, SSRF checks, no live network
+│   └── test_invites.py          # Invite cookies, budgets, CLI, no key leak
 ├── ai_avatar_democracy_v1.1.md  # Current white paper
 ├── CHANGES-v1.1.md              # Changes since v1.0
 ├── ai_avatar_democracy_v1.0.md  # Kept for history

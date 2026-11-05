@@ -15,12 +15,16 @@ Or with uvicorn directly, on loopback:
 A bind address other than 127.0.0.1, ::1, or localhost requires
 APP_ACCESS_TOKEN (at least 16 characters). Loopback does not.
 Use `python main.py` for that check. Uvicorn's own --host is not visible here.
+
+AVATAR_INVITE_MODE=1 adds a per-tester invite cookie on top of those checks.
+It does not replace the LAN token, the Host allowlist, or the Origin check.
 """
 
 from __future__ import annotations
 
 import hmac
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -34,7 +38,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -47,6 +51,7 @@ from backend import (
     comparison,
     conflict,
     extractors,
+    invites,
     llm,
     population,
     profile as profile_mod,
@@ -76,6 +81,8 @@ CONTENT_SECURITY_POLICY = (
     "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
 # HTTP routes that spend a model call. One shared per-IP bucket covers all of them.
+# When AVATAR_INVITE_MODE is on, the same list is where an invite's bill and
+# model-call budget is reserved. There is no second limiter.
 # POST /api/analyze spends a call for pasted text, an uploaded PDF, and the
 # official bill-link field (the URL is fetched, then analyzed like a file).
 # Backend callers behind those routes:
@@ -472,6 +479,23 @@ def is_spending_request(method: str, path: str) -> bool:
     )
 
 
+def invite_admission_cost(method: str, path: str) -> tuple[int, int]:
+    """Bills and model-call credits reserved when an invite spending request is admitted.
+
+    ``(0, 0)`` when the request is not a spending route. Analyze (pasted text,
+    an upload, or an official URL — all this path) reserves one bill and one
+    model call, plus a second model call when a comparison provider is
+    configured. Every other spending route reserves one model call and no bill.
+    The reserve happens in ``guard_api_request`` next to the shared per-IP limit.
+    """
+    if not is_spending_request(method, path):
+        return 0, 0
+    if path == "/api/analyze":
+        calls = 2 if comparison.comparison_configured() else 1
+        return 1, calls
+    return 0, 1
+
+
 def reset_rate_limits() -> None:
     """Drop the in-memory counters. Tests use this so cases stay independent."""
     with _rate_lock:
@@ -545,16 +569,54 @@ def _deny(status: int, detail: str, headers: dict[str, str] | None = None) -> JS
     return JSONResponse({"detail": detail}, status_code=status, headers=headers)
 
 
-def guard_api_request(request: Request) -> JSONResponse | None:
+def _reserve_invite_budget(request: Request) -> JSONResponse | None:
+    """Reserve this invite's budget for a spending route. None means it was reserved.
+
+    Called only from the spending branch of ``guard_api_request``. A revoked
+    or expired invite fails closed with the same 403 as a missing cookie.
+    """
+    record = getattr(request.state, "invite", None)
+    if not isinstance(record, invites.Invite):
+        return _deny(403, "Forbidden")
+    bills, calls = invite_admission_cost(request.method, request.url.path)
+    try:
+        outcome = invites.try_reserve(record.id, bills, calls)
+    except (invites.InvitePathError, sqlite3.Error):
+        return _deny(403, "Forbidden")
+    if outcome == "ok":
+        return None
+    if outcome == "bills":
+        return _deny(429, "Invite bill budget exhausted")
+    if outcome == "daily":
+        return _deny(429, "Invite daily bill limit reached. It resets at UTC midnight.")
+    if outcome == "calls":
+        return _deny(429, "Invite model-call budget exhausted")
+    return _deny(403, "Forbidden")
+
+
+def guard_api_request(request: Request) -> Response | None:
     """Block a bad request. None means the route may run.
 
     Host is checked on every route, including pages, before Origin and before
-    the access token. Static pages, the manifest, icons, and sw.js still do
-    not need the token.
+    either credential. When invite mode is on, every route except static files
+    and the token landing needs a valid invite cookie. That check does not
+    replace the LAN token: a non-loopback bind still requires X-Access-Token
+    on /api, and the shared per-IP limit still runs on spending routes.
+    Invite budgets are reserved in that same spending branch.
     """
     if not host_header_allowed(_raw_header_values(request, "host")):
         return _deny(421, "Misdirected Request")
     path = request.url.path
+    if invites.invite_mode_enabled() and not invites.request_is_exempt(request.method, path):
+        try:
+            record = invites.authenticate_cookie(request)
+        except invites.InvitePathError:
+            record = None
+        if record is None:
+            if path == "/api" or path.startswith("/api/"):
+                return _deny(403, "Forbidden")
+            return invites.denied_page()
+        request.state.invite = record
     if path != "/api" and not path.startswith("/api/"):
         return None
     if access_token_required() and not _presented_token_ok(request):
@@ -567,14 +629,20 @@ def guard_api_request(request: Request) -> JSONResponse | None:
         types = _media_types(request)
         if not types or any(media != expected for media in types):
             return _deny(415, "Unsupported Media Type")
-    if access_token_required() and is_spending_request(request.method, path):
-        if _rate_limited(request):
+    if is_spending_request(request.method, path):
+        if access_token_required() and _rate_limited(request):
             return _deny(429, "Too Many Requests", {"Retry-After": str(int(RATE_WINDOW_SECONDS))})
+        if invites.invite_mode_enabled():
+            blocked = _reserve_invite_budget(request)
+            if blocked is not None:
+                return blocked
     return None
 
 
-def _with_security_headers(response: JSONResponse):
+def _with_security_headers(response: Response) -> Response:
     response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+    if invites.invite_mode_enabled():
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
     return response
 
 
@@ -591,13 +659,24 @@ if FRONTEND_DIR.exists():
 
 @app.middleware("http")
 async def reject_untrusted_api_requests(request: Request, call_next):
-    """Host allowlist, then token, origin, content type, and the LAN rate limit."""
-    blocked = guard_api_request(request)
-    if blocked is not None:
-        return _with_security_headers(blocked)
-    response = await call_next(request)
-    response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
-    return response
+    """Host allowlist, invite cookie, LAN token, origin, content type, and budgets.
+
+    The per-IP rate limit and the per-invite budget both run inside
+    ``guard_api_request`` on spending routes. The usage log is appended here
+    after that decision, and only for a request that already presented a
+    valid invite. The raw token is not logged.
+    """
+    usage_token = llm.begin_request_usage()
+    try:
+        blocked = guard_api_request(request)
+        if blocked is not None:
+            invites.record_request(request, blocked.status_code, blocked, llm.snapshot_request_usage())
+            return _with_security_headers(blocked)
+        response = await call_next(request)
+        invites.record_request(request, response.status_code, response, llm.snapshot_request_usage())
+        return _with_security_headers(response)
+    finally:
+        llm.end_request_usage(usage_token)
 
 
 class AnalyzeTextRequest(BaseModel):
@@ -635,9 +714,19 @@ def _serve(filename: str) -> FileResponse:
 
 
 @app.get("/")
-async def root() -> FileResponse:
-    """Serve the landing page."""
+async def root(request: Request) -> Response:
+    """Serve the landing page. In invite mode this is also the token exchange."""
+    if invites.invite_mode_enabled():
+        return invites.landing(request, serve_index=lambda: _serve("index.html"))
     return _serve("index.html")
+
+
+@app.get("/invite")
+async def invite_landing(request: Request) -> Response:
+    """Token landing alias. With invite mode off this is not a page."""
+    if not invites.invite_mode_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return invites.landing(request, serve_index=None, redirect_path="/")
 
 
 @app.get("/analyze")
@@ -807,6 +896,7 @@ async def analyze(
     # Omitted entirely when comparison is not configured.
     if isinstance(analysis, dict) and "model_comparison" in analysis:
         body["model_comparison"] = analysis["model_comparison"]
+    llm.absorb_reported_usage(body)
     return JSONResponse(content=body)
 
 
@@ -982,7 +1072,9 @@ async def avatar_vote(req: VoteRequest) -> JSONResponse:
             if v.needs_human_review and v.position in ("yes", "no")
         ),
     })
-    return JSONResponse(content={"vote": vote.to_dict()})
+    payload = {"vote": vote.to_dict()}
+    llm.absorb_reported_usage(payload)
+    return JSONResponse(content=payload)
 
 
 @app.post("/api/avatar/override")
@@ -1123,7 +1215,9 @@ async def endorse_bill(bill_id: str) -> JSONResponse:
     audit.log_event("bill_endorsed", {"id": bill.id, "total": bills_mod.total_endorsements(bill)})
     _freeze_and_analyze(bill)
     bills_mod.save_bill(bill)
-    return JSONResponse(content={"bill": bill.to_dict()})
+    payload = {"bill": bill.to_dict()}
+    llm.absorb_reported_usage(payload)
+    return JSONResponse(content=payload)
 
 
 @app.delete("/api/bills/{bill_id}/endorse")
@@ -1150,7 +1244,9 @@ async def simulate_endorsements(bill_id: str, req: SimulateRequest) -> JSONRespo
     bill.simulated_endorsements += max(0, req.count)
     _freeze_and_analyze(bill)
     bills_mod.save_bill(bill)
-    return JSONResponse(content={"bill": bill.to_dict()})
+    payload = {"bill": bill.to_dict()}
+    llm.absorb_reported_usage(payload)
+    return JSONResponse(content=payload)
 
 
 @app.post("/api/bills/{bill_id}/vote")
@@ -1204,7 +1300,9 @@ async def vote_on_bill(bill_id: str) -> JSONResponse:
     })
     audit.log_event("bill_passed" if bill.result["passed"] else "bill_failed",
                     {"id": bill.id, "title": bill.title})
-    return JSONResponse(content={"bill": bill.to_dict()})
+    payload = {"bill": bill.to_dict()}
+    llm.absorb_reported_usage(payload)
+    return JSONResponse(content=payload)
 
 
 # ── Proxy Chamber: population ─────────────────────────────────────────────────

@@ -26,6 +26,7 @@ sandboxes the model.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 from abc import ABC, abstractmethod
@@ -120,6 +121,7 @@ class LLMProvider(ABC):
             log = []
             self.usage_log = log
         log.append(usage)
+        _note_request_usage(usage)
 
     @abstractmethod
     def complete(
@@ -224,6 +226,99 @@ def _openai_usage(payload: Any) -> TokenUsage:
         output_tokens=_as_token_count(usage.get("completion_tokens", usage.get("output_tokens"))),
         reasoning_tokens=reasoning,
     )
+
+
+# Per-request totals for the invite usage log. Empty outside a request.
+# This does not enforce budgets. main.guard_api_request does that.
+_request_usage: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "avatar_request_usage",
+    default=None,
+)
+
+
+def begin_request_usage() -> contextvars.Token[dict[str, int] | None]:
+    """Start a request-local usage bucket. Pair with ``end_request_usage``."""
+    return _request_usage.set({"calls": 0, "tokens": 0, "tokens_known": 0})
+
+
+def end_request_usage(token: contextvars.Token[dict[str, int] | None]) -> None:
+    _request_usage.reset(token)
+
+
+def snapshot_request_usage() -> tuple[int, int | None]:
+    """Calls observed on this task, and token total when the provider reported any."""
+    bucket = _request_usage.get()
+    if not bucket or bucket["calls"] <= 0:
+        return 0, None
+    tokens = int(bucket["tokens"]) if bucket["tokens_known"] else None
+    return int(bucket["calls"]), tokens
+
+
+def absorb_reported_usage(payload: Any) -> None:
+    """Fold ``token_usage`` objects in a handler result into the request bucket.
+
+    The middleware streams the response, so it cannot read this JSON later.
+    When the reported call count is higher than the calls already noted on
+    this task, the bucket keeps the higher count. That covers a comparison
+    pass that ran on a worker thread and did not share this task's context.
+    """
+    bucket = _request_usage.get()
+    if bucket is None:
+        return
+    found: list[dict[str, Any]] = []
+
+    def walk(value: Any, depth: int) -> None:
+        if depth > 6 or len(found) > 20:
+            return
+        if isinstance(value, dict):
+            usage = value.get("token_usage")
+            if isinstance(usage, list):
+                for item in usage:
+                    if isinstance(item, dict):
+                        found.append(item)
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    walk(child, depth + 1)
+        elif isinstance(value, list):
+            for child in value[:50]:
+                if isinstance(child, (dict, list)):
+                    walk(child, depth + 1)
+
+    walk(payload, 0)
+    calls = 0
+    tokens = 0
+    known = False
+    for item in found:
+        count = item.get("calls")
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            calls += count
+        for key in ("input_tokens", "output_tokens", "reasoning_tokens"):
+            number = item.get(key)
+            if isinstance(number, int) and not isinstance(number, bool) and number >= 0:
+                tokens += number
+                known = True
+    if calls > bucket["calls"]:
+        bucket["calls"] = calls
+    if known and tokens > bucket["tokens"]:
+        bucket["tokens"] = tokens
+        bucket["tokens_known"] = 1
+
+
+def _note_request_usage(usage: TokenUsage) -> None:
+    bucket = _request_usage.get()
+    if bucket is None:
+        return
+    bucket["calls"] += 1
+    total = 0
+    known = False
+    for name in ("input_tokens", "output_tokens", "reasoning_tokens"):
+        value = _as_token_count(getattr(usage, name, None))
+        if value is not None and value >= 0:
+            total += value
+            known = True
+    if known:
+        bucket["tokens"] += total
+        bucket["tokens_known"] = 1
 
 
 def consume_usage(provider: LLMProvider, *, role: str) -> list[dict[str, Any]]:

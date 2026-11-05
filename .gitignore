@@ -3,8 +3,14 @@
 *.env
 !.env.example
 
-# Runtime state (per-citizen profile + audit log)
+# Runtime state (per-citizen profile + audit log + invite store)
 data/
+
+# Invite store if AVATAR_INVITE_DATA_DIR points somewhere else inside the repo
+invite-hmac.key
+invites.sqlite
+invites.sqlite-*
+invite-usage.jsonl
 
 # Python
 __pycache__/
