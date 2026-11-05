@@ -165,9 +165,25 @@ To run the primary role itself on that endpoint, set `LLM_PROVIDER=openai` and `
 
 `COMPARISON_VOTE_POLICY=review` does not withhold the vote. It keeps the primary model's yes or no and only adds a human-review flag. A chamber tally still counts that yes or no. Use `abstain` when a disagreement should stop the vote.
 
-The comparison provider and model have to differ from the primary. The same provider and the same model id is refused, including when the only difference is a provider prefix (`openai/gpt-4o`), a date suffix (`gpt-4o-2024-08-06`), or a `-latest` tag. A leftover suffix that is not one of those, such as `gpt-4o` next to `gpt-4o-mini`, is ambiguous: the check still runs and the response carries `self_comparison_warning`.
+The comparison counts as independent only when the two models come from different vendors. The check compares the vendor, not the model family. Sonnet against Haiku is refused, and so is `gpt-4o` against `gpt-4o-mini`, a date suffix, or a `-latest` tag on the same vendor. Two OpenAI-compatible models still count as different vendors when the model id names the vendor (`meta-llama/...` against `qwen/...`).
 
-Agreement is checked by comparing the wording, not the meaning. The same words in a different order of numbers disagree ("from 5 to 10" is not "from 10 to 5"). A paraphrase a person would call the same claim still disagrees, so the Avatar abstains more often than a careful reader might expect. A review of cases that should have agreed found that most of them abstained for that reason.
+### How amounts, dates, and versions are read
+
+Amounts are an ordered sequence. `from 5 to 10` is not `from 10 to 5`.
+
+Failing closed on an ambiguous amount is deliberate. There is no bill-locale switch. A model can write English thousands or a Polish decimal comma in the same sentence, and guessing a locale would create false agreements.
+
+A comma after a leading 0 is a decimal mark, so `0,500` is `0.5`, not `500`. A single group of exactly three digits after a comma or a dot, with no other separator, is ambiguous: `1,500` and `1.500` can be 1500 or 1.5. An ambiguous amount on either side fails the match, and the Avatar abstains. These forms still resolve, because they can only be read one way: `1,500.00`, `1.500,00`, `1,500,000`, and `1.500.000`. A comma followed by one or two digits is a decimal comma, so `1,5` and `1,50` are `1.5`. An apostrophe thousands group equals the plain number by design: `1'500` is `1500`. That is not a space-grouped amount.
+
+A space-grouped number and an ungrouped number are never the same amount. `12 500 zł` is not `12500 zł`, and the Avatar abstains. That is deliberate: a space can be a thousands separator or a break between two numbers, and joining them would agree when the amounts differ. Two space-grouped numbers match only when the digit groups are exactly the same. `12 500 zł` matches `12 500 zł`. A normal space, a non-breaking space, a thin space, a narrow no-break space, a line break, and a tab are the same gap, so `12\n500 zł` matches `12 500 zł` and still does not match `12500 zł`. A zero-width space is not a gap. `12\u200b500` stays two numbers, so it matches neither `12 500` nor `12500`. The word in front does not change this. `art. 12 500 zł`, `kap.`, `rozdz.`, `no.`, `par.`, `Abs.`, `tit.`, `§`, `ledd`, and a hyphenated range such as `art. 12-14 500 zł` all abstain against the joined digits.
+
+The wording around an amount keeps every sign that is not sentence punctuation. A period, comma, colon, semicolon, exclamation mark, question mark, quote, or a hyphen between words does not by itself make two claims differ. Any other sign does, so `§ 1 000 kr` is not `1 000 kr`, and the same is true of `§§`, `№`, `#`, and a parenthesis.
+
+Scale words do not join groups and do not multiply the number. `mln`, `mld`, `tys.`, `million`, and `milliard` stay ordinary words, so `1 500 mln` is not read as 1.5 billion and does not match `1500`. That disagreement is deliberate.
+
+Lists stay in order. `sections 3, 4 and 5` is three numbers, not 3.4 and not 345. Dates are their own tokens: `2026-11-04`, a day-month-year date whose day is greater than 12 such as `15.11.2026`, and a named month such as `4 listopada 2026` or `4. november 2026`. A dotted date with both parts at most 12, such as `04.11.2026`, is ambiguous and fails the match. Versions such as `v1.2.3` are not three plain numbers. A different sequence of any of these is a disagreement.
+
+Agreement is checked by comparing the wording, not the meaning. The same words in a different order of numbers disagree ("from 5 to 10" is not "from 10 to 5"). A paraphrase a person would call the same claim still disagrees, so the Avatar is expected to abstain more often than a careful reader would. A review of cases that should have agreed found that about 5 of 7 abstained for that reason.
 
 The report is `model_comparison` on `POST /api/analyze` (and on the stored bill analysis). The analyzer page shows it next to the grounding banner. The vote page shows an abstention or a human-review flag per section, alongside any quote-grounding abstention. Both models go through the same fence or document block, the same schema retry, and the same verbatim-quote check. A quote marked `grounded: false` is displayed and is not used as a match.
 

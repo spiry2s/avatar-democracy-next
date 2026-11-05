@@ -22,6 +22,7 @@ and does not add a key.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Callable
 
 from backend import config, llm, summarizer
@@ -43,7 +44,18 @@ _ALL_TARGETS = {
     "*",
 }
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+# ł stays inside "zł". Splitting it would turn the currency into the word "z".
+# This is for overlap and negations. The text around a number is compared
+# separately and keeps every sign that is not in _HARMLESS_PUNCT.
+_TOKEN = re.compile(r"[a-z0-9ł]+")
+# Sentence punctuation, quotes, and the hyphens or dashes that sit between
+# words. A dash in this set is ignored only between words. Every other
+# sign, including § № # * ( ), stays and makes the two sides differ.
+_HARMLESS_PUNCT = frozenset(
+    ".,;:!?\"'"
+    "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f"
+    "-\u2010\u2011\u2012\u2013\u2014\u2015"
+)
 # Whole words only. "notice" is not "not", and "niece" is not Polish "nie".
 # "shall not" and "may not" are covered because "not" is its own word.
 _NEGATIONS = frozenset({
@@ -57,20 +69,6 @@ _NEGATIONS = frozenset({
     "ikke",   # Norwegian
     "ingen",  # Norwegian
 })
-# Thousands separators: comma, space, NBSP, and the narrow no-break space
-# used in Polish and Norwegian grouping. A comma or dot before a non-group
-# of digits is a decimal mark. The first alternative must win for "1,000"
-# so it is not read as a decimal.
-_GROUP_SEP = r"[, \u00a0\u202f]"
-_NUMBER_RE = re.compile(
-    r"(?<![a-z0-9])"
-    r"([$€£])?\s*"
-    r"(\d{1,3}(?:(?:" + _GROUP_SEP + r")\d{3})+(?:[.,]\d+)?"
-    r"|\d+[.,]\d+"
-    r"|\d+)"
-    r"(\s*%)?",
-    re.IGNORECASE,
-)
 _MODEL_DATE = re.compile(r"-(?:19|20)\d{2}-\d{2}-\d{2}$")
 _MODEL_COMPACT_DATE = re.compile(r"-(?:19|20)\d{6}$")
 _MODEL_TAG = re.compile(r"-(?:latest|preview|experimental)$")
@@ -120,10 +118,16 @@ def targets_all_sections(section: str) -> bool:
 
 
 def _prepare(text: str) -> str:
-    """Lowercase and expand contractions so "don't" and "cannot" expose "not"."""
-    lowered = str(text).lower().replace("\u2019", "'")
-    lowered = lowered.replace("n't", " not ")
-    return re.sub(r"\bcannot\b", " can not ", lowered)
+    """NFKC, casefold, then expand contractions so "don't" and "cannot" expose "not".
+
+    Folding happens before the number scan and the context comparison, so
+    both sides of a match see the same characters. A curly apostrophe
+    becomes the straight one that the apostrophe-thousands rule reads.
+    """
+    folded = unicodedata.normalize("NFKC", str(text)).casefold()
+    folded = folded.replace("\u2019", "'").replace("\u2018", "'")
+    folded = folded.replace("n't", " not ")
+    return re.sub(r"\bcannot\b", " can not ", folded)
 
 
 def _norm_phrase(text: str) -> str:
@@ -138,10 +142,34 @@ def _negations(text: str) -> frozenset[str]:
     return frozenset(token for token in _tokens(text) if token in _NEGATIONS)
 
 
-def _strip_group_separators(body: str) -> str:
-    for sep in (",", " ", "\u00a0", "\u202f"):
-        body = body.replace(sep, "")
-    return body
+# Gaps that separate digit groups. A normal space, NBSP, narrow no-break
+# space, thin space, figure space, tab, and line break are the same gap.
+# They never glue the groups into one integer. Apostrophes still do:
+# "1'500" is 1500. The word before the groups does not matter.
+_GROUP_SPACES = frozenset(" \t\n\r\f\v\u00a0\u202f\u2009\u2007\u2028\u2029")
+_APOSTROPHES = frozenset("'’ʼ")
+_MONTHS = {
+    # Polish genitive, the form used in "4 listopada 2026".
+    "stycznia": 1, "lutego": 2, "marca": 3, "kwietnia": 4, "maja": 5,
+    "czerwca": 6, "lipca": 7, "sierpnia": 8, "września": 9, "wrzesnia": 9,
+    "października": 10, "pazdziernika": 10, "listopada": 11, "grudnia": 12,
+    # Norwegian.
+    "januar": 1, "februar": 2, "mars": 3, "april": 4, "mai": 5, "juni": 6,
+    "juli": 7, "august": 8, "september": 9, "oktober": 10, "november": 11,
+    "desember": 12,
+}
+_VERSION_RE = re.compile(r"v(\d+(?:\.\d+)+)\b", re.IGNORECASE)
+_ISO_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})\b")
+_DOT_DATE_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})\b")
+_NAMED_DATE_RE = re.compile(
+    r"(\d{1,2})\.?\s+([a-ząćęłńóśźż]+)\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+
+# A mark is (kind, value, start, end). kind is number, date, version, or
+# ambiguous. An ambiguous mark on either side fails the match: the check
+# will not guess.
+_Mark = tuple[str, str, int, int]
 
 
 def _join_decimal(whole: str, frac: str) -> str:
@@ -152,51 +180,371 @@ def _join_decimal(whole: str, frac: str) -> str:
     return f"{whole}.{frac}"
 
 
-def _number_key(prefix: str, body: str, percent: str | None) -> str:
-    """One canonical number. 1,000, 1000, and '1 000' agree; 1,5 and 1.5 agree."""
-    body = body.replace("\u00a0", " ").replace("\u202f", " ")
+def _valid_day_month(day: int, month: int) -> bool:
+    return 1 <= day <= 31 and 1 <= month <= 12
+
+
+def _date_value(year: int, month: int, day: int) -> str | None:
+    if not _valid_day_month(day, month) or year < 1000:
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _classify_number_body(body: str) -> tuple[str, str]:
+    """Return ('number', canonical) or ('ambiguous', original).
+
+    Mixed dot and comma: the separator that comes last is the decimal mark
+    and the other is grouping. Grouping chunks must be exactly three digits.
+
+    A comma after a leading 0 is a decimal mark, so 0,500 is 0.5 and
+    0,500% is 0.5%. A single group of exactly three digits after a comma
+    or a dot, with no other separator, is ambiguous: 1,500 and 1.500 can
+    be 1500 or 1.5. The match fails. There is no bill-locale switch.
+
+    These forms still resolve. 1,500,000 and 1.500.000 are thousands.
+    1,500.00 and 1.500,00 use whichever separator comes last as the
+    decimal mark, so both are 1500. A comma followed by one or two digits
+    is a decimal comma, so 1,5 and 1,50 are 1.5.
+    """
     if "," in body and "." in body:
         if body.rfind(",") > body.rfind("."):
-            whole, frac = body.replace(".", "").rsplit(",", 1)
-            whole = _strip_group_separators(whole)
+            whole, frac = body.rsplit(",", 1)
+            groups = whole.split(".")
         else:
-            whole, frac = body.replace(",", "").replace(" ", "").rsplit(".", 1)
-        number = _join_decimal(whole, frac)
-    elif "," in body or " " in body:
-        parts = re.split(r"[, ]", body)
-        if all(len(part) == 3 and part.isdigit() for part in parts[1:]):
-            number = ("".join(parts)).lstrip("0") or "0"
+            whole, frac = body.rsplit(".", 1)
+            groups = whole.split(",")
+        if not frac.isdigit() or not groups or not groups[0].isdigit():
+            return ("ambiguous", body)
+        if any(not part.isdigit() or len(part) != 3 for part in groups[1:]):
+            return ("ambiguous", body)
+        return ("number", _join_decimal("".join(groups), frac))
+    if "," in body:
+        parts = body.split(",")
+        if (
+            parts[0].isdigit()
+            and set(parts[0]) <= {"0"}
+            and len(parts) == 2
+            and parts[1].isdigit()
+        ):
+            # 0,500 is five tenths, not five hundred. A comma after a
+            # leading 0 is a decimal mark no matter how many digits follow.
+            return ("number", _join_decimal("0", parts[1]))
+        if all(part.isdigit() and len(part) == 3 for part in parts[1:]) and parts[0].isdigit():
+            # One bare group (1,500 / 2,250) is ambiguous. Two or more
+            # (1,500,000) can only be thousands.
+            if len(parts) == 2:
+                return ("ambiguous", body)
+            return ("number", ("".join(parts)).lstrip("0") or "0")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit() and len(parts[1]) in (1, 2):
+            return ("number", _join_decimal(parts[0], parts[1]))
+        return ("ambiguous", body)
+    if "." in body:
+        parts = body.split(".")
+        if not all(part.isdigit() for part in parts) or not parts[0]:
+            return ("ambiguous", body)
+        if len(parts) == 2 and len(parts[1]) == 3:
+            return ("ambiguous", body)
+        if len(parts) >= 3 and all(len(part) == 3 for part in parts[1:]):
+            return ("number", ("".join(parts)).lstrip("0") or "0")
+        if len(parts) == 2:
+            return ("number", _join_decimal(parts[0], parts[1]))
+        return ("ambiguous", body)
+    if body.isdigit():
+        return ("number", body.lstrip("0") or "0")
+    return ("ambiguous", body)
+
+
+def _match_version(text: str, i: int) -> _Mark | None:
+    match = _VERSION_RE.match(text, i)
+    if match is None:
+        return None
+    return ("version", match.group(1), match.start(), match.end())
+
+
+def _match_date(text: str, i: int) -> _Mark | None:
+    iso = _ISO_DATE_RE.match(text, i)
+    if iso is not None:
+        value = _date_value(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        if value is None:
+            return ("ambiguous", iso.group(0), iso.start(), iso.end())
+        return ("date", value, iso.start(), iso.end())
+    dotted = _DOT_DATE_RE.match(text, i)
+    if dotted is not None:
+        first, second, year = int(dotted.group(1)), int(dotted.group(2)), int(dotted.group(3))
+        # Both parts fit a day and a month, so day.month and month.day are
+        # both possible. That is ambiguous and must not match either reading.
+        if first <= 12 and second <= 12:
+            return ("ambiguous", dotted.group(0), dotted.start(), dotted.end())
+        if 13 <= first <= 31 and second <= 12:
+            value = _date_value(year, second, first)
         else:
-            whole, frac = parts[0], "".join(parts[1:])
-            number = _join_decimal(whole, frac)
-    elif "." in body:
-        whole, frac = body.split(".", 1)
-        number = _join_decimal(whole, frac)
-    else:
-        number = body.lstrip("0") or "0"
-    if prefix:
-        number = prefix + number
-    if percent and "%" in percent:
-        number += "%"
-    return number
+            value = None
+        if value is None:
+            return ("ambiguous", dotted.group(0), dotted.start(), dotted.end())
+        return ("date", value, dotted.start(), dotted.end())
+    named = _NAMED_DATE_RE.match(text, i)
+    if named is not None and named.group(2).lower() in _MONTHS:
+        value = _date_value(int(named.group(3)), _MONTHS[named.group(2).lower()], int(named.group(1)))
+        if value is None:
+            return ("ambiguous", named.group(0), named.start(), named.end())
+        return ("date", value, named.start(), named.end())
+    return None
+
+
+def _following_digit_groups(text: str, i: int) -> tuple[list[str], int] | None:
+    """Raw digit groups after i, each one introduced by a grouping gap.
+
+    The gap may be several characters. The digits are kept as written, so
+    "012" is not "12" and "000" is not "0". None when no group follows.
+    """
+    groups: list[str] = []
+    j = i
+    while j < len(text) and text[j] in _GROUP_SPACES:
+        k = j
+        while k < len(text) and text[k] in _GROUP_SPACES:
+            k += 1
+        if k >= len(text) or not text[k].isdigit():
+            break
+        end = k + 1
+        while end < len(text) and text[end].isdigit():
+            end += 1
+        groups.append(text[k:end])
+        j = end
+    if not groups:
+        return None
+    return groups, j
+
+
+def _grouped_fraction(text: str, i: int) -> tuple[str, int] | None:
+    """A decimal on the last space-separated group, or an ambiguous tail.
+
+    One or two digits are a decimal comma or dot, so "500,50" is "500.5".
+    Three or more digits can be thousands or a long fraction, so the mark
+    fails closed. The integer digits of the group stay as written.
+    """
+    if i >= len(text) or text[i] not in ",.":
+        return None
+    end = i + 1
+    while end < len(text) and text[end].isdigit():
+        end += 1
+    width = end - (i + 1)
+    if width == 0:
+        return None
+    if width > 2:
+        return ("ambiguous", end)
+    frac = text[i + 1:end].rstrip("0")
+    return (("." + frac) if frac else "", end)
+
+
+def _match_number(text: str, i: int) -> _Mark | None:
+    start = i
+    prefix = ""
+    if text[i] in "$€£":
+        prefix = text[i]
+        i += 1
+        while i < len(text) and text[i] in _GROUP_SPACES:
+            i += 1
+    if i >= len(text) or not text[i].isdigit():
+        return None
+    body_start = i
+    while i < len(text) and text[i].isdigit():
+        i += 1
+    first_end = i
+    followed = _following_digit_groups(text, i)
+    if followed is not None:
+        # "12 500" stays the groups 12 and 500. It is not 12500, even when
+        # a currency, a hyphen, or a citation word sits beside it.
+        extra, i = followed
+        groups = [text[body_start:first_end], *extra]
+        fraction = _grouped_fraction(text, i)
+        if fraction is not None:
+            suffix, i = fraction
+            if suffix == "ambiguous":
+                if i < len(text) and text[i] == "%":
+                    i += 1
+                return ("ambiguous", " ".join(groups), start, i)
+            groups[-1] = groups[-1] + suffix
+        value = " ".join(groups)
+        if prefix:
+            value = prefix + value
+        if i < len(text) and text[i] == "%":
+            value += "%"
+            i += 1
+        return ("number", value, start, i)
+    while i < len(text):
+        ch = text[i]
+        if ch in _GROUP_SPACES:
+            break
+        if ch in _APOSTROPHES:
+            nxt = i + 1
+            if nxt + 3 <= len(text) and text[nxt:nxt + 3].isdigit() and (
+                nxt + 3 == len(text) or not text[nxt + 3].isdigit()
+            ):
+                i = nxt + 3
+                continue
+            break
+        if ch == ",":
+            nxt = i + 1
+            if nxt < len(text) and text[nxt] in _GROUP_SPACES:
+                grp = nxt + 1
+                if grp + 3 <= len(text) and text[grp:grp + 3].isdigit() and (
+                    grp + 3 == len(text) or not text[grp + 3].isdigit()
+                ):
+                    i = grp + 3
+                    continue
+                break
+            end = nxt
+            while end < len(text) and text[end].isdigit():
+                end += 1
+            width = end - nxt
+            digits_so_far = "".join(ch for ch in text[body_start:i] if ch.isdigit())
+            # 0,5000 is the same decimal as 0,500. The classifier already
+            # treats a comma after a leading 0 as a decimal mark; the matcher
+            # has to hand it that whole body, including four or more digits.
+            if digits_so_far and set(digits_so_far) <= {"0"} and width >= 4:
+                i = end
+                break
+            if width == 3:
+                i = end
+                continue
+            if width in (1, 2):
+                i = end
+                break
+            break
+        if ch == ".":
+            nxt = i + 1
+            end = nxt
+            while end < len(text) and text[end].isdigit():
+                end += 1
+            width = end - nxt
+            if width == 0:
+                break
+            i = end
+            if width == 3:
+                continue
+            break
+        break
+    percent = ""
+    if i < len(text) and text[i] == "%":
+        percent = "%"
+        i += 1
+    body = text[body_start:i - (1 if percent else 0)]
+    # Drop grouping spaces and apostrophes before classification. They were
+    # only consumed as groups of three digits.
+    cleaned = "".join(ch for ch in body if ch not in _GROUP_SPACES and ch not in _APOSTROPHES)
+    kind, value = _classify_number_body(cleaned)
+    if kind == "number" and prefix:
+        value = prefix + value
+    if kind == "number" and percent:
+        value += percent
+    return (kind, value, start, i)
+
+
+def _scan_marks(text: str) -> list[_Mark]:
+    """Ordered quantities. Dates and versions are not plain numbers.
+
+    Lists such as "sections 3, 4 and 5" stay three numbers in that order.
+    A comma with a space is a list separator, not a decimal comma.
+    """
+    raw = _prepare(text)
+    marks: list[_Mark] = []
+    i = 0
+    length = len(raw)
+    while i < length:
+        ch = raw[i]
+        found: _Mark | None = None
+        if ch == "v":
+            found = _match_version(raw, i)
+        elif ch.isdigit() or ch in "$€£":
+            found = _match_date(raw, i) if ch.isdigit() else None
+            if found is None:
+                found = _match_number(raw, i)
+        if found is None:
+            i += 1
+            continue
+        marks.append(found)
+        i = max(found[3], i + 1)
+    return marks
+
+
+def _has_ambiguous(marks: list[_Mark]) -> bool:
+    return any(mark[0] == "ambiguous" for mark in marks)
+
+
+def _structural(marks: list[_Mark]) -> tuple[tuple[str, str], ...]:
+    return tuple((mark[0], mark[1]) for mark in marks)
+
+
+def _is_dash(ch: str) -> bool:
+    return ch in _HARMLESS_PUNCT and unicodedata.category(ch) == "Pd"
+
+
+def _letter_beside(chars: list[str], index: int, step: int) -> bool:
+    """True when a letter sits on this side, skipping spaces and dashes."""
+    j = index + step
+    while 0 <= j < len(chars):
+        ch = chars[j]
+        if ch.isspace() or _is_dash(ch):
+            j += step
+            continue
+        return ch.isalpha()
+    return False
+
+
+def _context_kept(chars: list[str]) -> str:
+    """Characters that still count once the quantity marks are blanked.
+
+    Whitespace is dropped. Sentence punctuation and quotes are dropped.
+    A hyphen or dash is dropped only when it sits between words. Everything
+    else is kept, in order, so a repeated sign is not the same as one sign.
+    """
+    kept: list[str] = []
+    for index, ch in enumerate(chars):
+        if ch.isspace():
+            continue
+        if ch in _HARMLESS_PUNCT and not _is_dash(ch):
+            continue
+        if _is_dash(ch) and _letter_beside(chars, index, -1) and _letter_beside(chars, index, 1):
+            continue
+        kept.append(ch)
+    return "".join(kept)
+
+
+def _words_outside(text: str, marks: list[_Mark]) -> str:
+    chars = list(_prepare(text))
+    for _kind, _value, start, end in marks:
+        for index in range(start, min(end, len(chars))):
+            chars[index] = " "
+    return _context_kept(chars)
 
 
 def _numbers(text: str) -> tuple[str, ...]:
-    """Numbers in the order they appear. A reversed range is a different sequence."""
-    keys = []
-    for match in _NUMBER_RE.finditer(str(text).lower()):
-        keys.append(_number_key(match.group(1) or "", match.group(2), match.group(3)))
-    return tuple(keys)
+    """Resolved plain numbers, in order.
+
+    An ambiguous amount becomes the single sentinel '<ambiguous>'. Dates and
+    versions are omitted here; they are their own marks and still participate
+    in the match.
+    """
+    marks = _scan_marks(text)
+    if _has_ambiguous(marks):
+        return ("<ambiguous>",)
+    return tuple(mark[1] for mark in marks if mark[0] == "number")
 
 
 def _polarity_agrees(left: str, right: str) -> bool:
-    """False when negations differ or the number sequences differ.
+    """False when negations differ, quantity sequences differ, or either side is ambiguous.
 
-    Numbers are an ordered sequence, not a set: "from 5 to 10" does not match
-    "from 10 to 5". A negation or a number on only one side does not match.
-    The check does not guess that "not" and "no" are the same word.
+    Numbers, dates, and versions are ordered sequences, not sets. "from 5 to
+    10" does not match "from 10 to 5". An unresolved amount such as "1.500"
+    fails the match even when both sides wrote it the same way.
     """
-    return _negations(left) == _negations(right) and _numbers(left) == _numbers(right)
+    if _negations(left) != _negations(right):
+        return False
+    left_marks = _scan_marks(left)
+    right_marks = _scan_marks(right)
+    if _has_ambiguous(left_marks) or _has_ambiguous(right_marks):
+        return False
+    return _structural(left_marks) == _structural(right_marks)
 
 
 def _jaccard(left: str, right: str) -> float:
@@ -224,6 +572,10 @@ def texts_match(left: str, right: str) -> bool:
     """
     if not _polarity_agrees(left, right):
         return False
+    # Same words once amounts, dates, and versions are removed. This is what
+    # lets "1,500" match "1500" without also treating a paraphrase as a match.
+    if _words_outside(left, _scan_marks(left)) == _words_outside(right, _scan_marks(right)):
+        return True
     a, b = _norm_phrase(left), _norm_phrase(right)
     if not a or not b:
         return False
@@ -418,7 +770,10 @@ def _high_claims_agree(left: str, right: str) -> bool:
         return False
     if not _polarity_agrees(left, right):
         return False
-    return _tokens(left) == _tokens(right)
+    # Quantity spans are blanked first, so "1,500" and "1500" share a word
+    # set when the surrounding words are the same. A different word is still
+    # a disagreement.
+    return _words_outside(left, _scan_marks(left)) == _words_outside(right, _scan_marks(right))
 
 
 def _paired_high_disagrees(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -928,27 +1283,35 @@ def normalize_model_id(model: str, provider_id: str) -> str:
     return name
 
 
+def _vendor(provider_id: str, model: str) -> str:
+    """Who trains the model, not which API wrapper serves it.
+
+    A model id may name the vendor (`anthropic/claude-haiku` on an
+    OpenAI-compatible endpoint). Otherwise the vendor is the provider.
+    """
+    provider = str(provider_id or "").strip().lower()
+    name = str(model or "").strip().lower()
+    for separator in ("/", ":"):
+        if separator in name:
+            head = name.split(separator, 1)[0]
+            if head:
+                return head
+    return provider
+
+
 def model_relationship(
     primary_model: str,
     primary_provider: str,
     comparison_model: str,
     comparison_provider: str,
 ) -> str:
-    """'same', 'ambiguous', or 'different'.
+    """'same_vendor' or 'different'.
 
-    'same' is refused. 'ambiguous' is a warning: one id is the other plus a
-    suffix that is not a date or a -latest tag, so it might be a different model.
-    Different vendors are 'different' even when the model strings match.
+    The comparison is independent only when the vendors differ. Sonnet and
+    Haiku are both Anthropic, so that pair is 'same_vendor' and is refused.
     """
-    if str(primary_provider or "").strip().lower() != str(comparison_provider or "").strip().lower():
-        return "different"
-    left = normalize_model_id(primary_model, primary_provider)
-    right = normalize_model_id(comparison_model, comparison_provider)
-    if left == right:
-        return "same"
-    longer, shorter = (left, right) if len(left) >= len(right) else (right, left)
-    if shorter and longer.startswith(shorter) and longer[len(shorter):].startswith("-"):
-        return "ambiguous"
+    if _vendor(primary_provider, primary_model) == _vendor(comparison_provider, comparison_model):
+        return "same_vendor"
     return "different"
 
 
@@ -971,24 +1334,15 @@ def analyze_for_api(bill_text: str) -> dict[str, Any]:
             comparison_provider.model,
             comparison_provider.provider_id,
         )
-        if relation == "same":
+        if relation == "same_vendor":
             raise llm.LLMConfigError(
-                "The comparison provider and model are the same as the primary "
-                f"({primary_id} / {normalize_model_id(primary_model, primary_id)}). "
-                "A date suffix or a -latest tag does not make it a different model. "
-                "That is not an independent check. "
-                "Set COMPARISON_PROVIDER or COMPARISON_MODEL to a different model."
+                "The comparison only counts as independent when the models come "
+                "from different vendors. "
+                f"Both are {_vendor(primary_id, primary_model)!r}: "
+                f"{primary_model} and {comparison_provider.model}. "
+                "Sonnet and Haiku are the same vendor. "
+                "This is not an independent check."
             )
-        self_comparison_warning = ""
-        if relation == "ambiguous":
-            self_comparison_warning = (
-                f"The comparison model {comparison_provider.model!r} looks like the "
-                f"primary model {primary_model!r} with an extra suffix. That suffix "
-                "is not a date or a -latest tag, so this might be a different model "
-                "and the check still ran. It may not be an independent check."
-            )
-    else:
-        self_comparison_warning = ""
     primary = summarizer.analyze_bill(bill_text).to_dict()
     if comparison_provider is None:
         return primary
@@ -1010,7 +1364,5 @@ def analyze_for_api(bill_text: str) -> dict[str, Any]:
         },
         policy=policy,
     )
-    if self_comparison_warning:
-        report["self_comparison_warning"] = self_comparison_warning
     primary["model_comparison"] = report
     return primary

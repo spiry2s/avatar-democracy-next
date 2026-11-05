@@ -1058,7 +1058,7 @@ def test_negation_and_numbers_block_a_match():
     assert comparison.texts_match("raise the wage to 15 dollars", "raise the wage to 16 dollars") is False
     assert comparison.texts_match("a fee of 15%", "a fee of 15") is False
     assert comparison.texts_match("a fee of $1,000", "a fee of $2,000") is False
-    assert comparison.texts_match("a fee of $1,000", "a fee of $1000") is True
+    assert comparison.texts_match("a fee of $1,000", "a fee of $1000") is False
     assert comparison.texts_match("effective 2026-01-02", "effective 2026-01-03") is False
 
 
@@ -1180,11 +1180,12 @@ def test_reversed_number_range_is_a_disagreement_and_abstains(monkeypatch):
 def test_number_formats_and_ranges_that_mean_the_same_span():
     assert comparison.texts_match("from 5 to 10", "5–10") is True
     assert comparison.texts_match("from 5 to 10", "5-10") is True
-    assert comparison._numbers("1,000") == ("1000",)
+    assert comparison._numbers("1,000") == ("<ambiguous>",)
     assert comparison._numbers("1000") == ("1000",)
-    assert comparison._numbers("1 000") == ("1000",)
-    assert comparison._numbers("1\u00a0000") == ("1000",)
-    assert comparison._numbers("1\u202f000") == ("1000",)
+    assert comparison._numbers("1 000") == ("1 000",)
+    assert comparison._numbers("1\u00a0000 zł") == ("1 000",)
+    assert comparison._numbers("1\u202f000 kr") == ("1 000",)
+    assert comparison.texts_match("the fee is 1 000 zł", "the fee is 1000 zł") is False
     assert comparison._numbers("1,5") == comparison._numbers("1.5") == ("1.5",)
     assert comparison._numbers("1,50") == ("1.5",)
 
@@ -1192,18 +1193,21 @@ def test_number_formats_and_ranges_that_mean_the_same_span():
 def test_dated_model_alias_is_refused_and_a_vague_suffix_warns(monkeypatch):
     assert comparison.model_relationship(
         "gpt-4o", "openai", "openai/gpt-4o-2024-08-06", "openai"
-    ) == "same"
+    ) == "same_vendor"
     assert comparison.model_relationship(
         "gpt-4o", "openai", "gpt-4o-latest", "openai"
-    ) == "same"
+    ) == "same_vendor"
     assert comparison.model_relationship(
         "gpt-4o", "openai", "gpt-4o-mini", "openai"
-    ) == "ambiguous"
+    ) == "same_vendor"
     assert comparison.model_relationship(
-        "claude-sonnet-4-6", "anthropic", "claude-sonnet-4-5", "anthropic"
+        "claude-sonnet-4-6", "anthropic", "claude-haiku-4-5", "anthropic"
+    ) == "same_vendor"
+    assert comparison.model_relationship(
+        "gpt-4o", "openai", "claude-sonnet-4-6", "anthropic"
     ) == "different"
     assert comparison.model_relationship(
-        "gpt-4o", "openai", "gpt-4o", "anthropic"
+        "meta-llama/Llama-3.1-8B", "openai", "qwen/Qwen2-7B", "openai"
     ) == "different"
 
     monkeypatch.setattr(config, "COMPARISON_PROVIDER", "anthropic")
@@ -1211,6 +1215,339 @@ def test_dated_model_alias_is_refused_and_a_vague_suffix_warns(monkeypatch):
     monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
     monkeypatch.setattr(config, "MODEL", "claude-sonnet-4-6")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    with pytest.raises(llm.LLMConfigError, match="not an independent check"):
+        comparison.analyze_for_api("Sec. 101. A short bill about taxes and rates.")
+
+
+def test_european_dot_thousands_are_explicit_and_ambiguous_dots_fail(monkeypatch):
+    """1.500 is not resolved. 1.500,00 is 1500. Polish and Norwegian forms too."""
+    assert comparison._numbers("1.500") == ("<ambiguous>",)
+    assert comparison._numbers("1.500,00") == ("1500",)
+    assert comparison._numbers("1,500.00") == ("1500",)
+    assert comparison._numbers("1.500.000") == ("1500000",)
+    assert comparison.texts_match("the fee is 1.500", "the fee is 1500") is False
+    assert comparison.texts_match("the fee is 1.500", "the fee is 1.5") is False
+    assert comparison.texts_match("the fee is 1.500", "the fee is 1.500") is False
+    assert comparison.texts_match("kwota 1.500,00 zł", "kwota 1500 zł") is True
+    assert comparison.texts_match("beløp 1.500,50 kr", "beløp 1500.50 kr") is True
+    assert comparison._numbers("1 500,50") == comparison._numbers("1\u00a0500,50") == ("1 500.5",)
+    assert comparison.texts_match("kwota 1 500,50 zł", "kwota 1500,50 zł") is False
+    # A day greater than 12 makes the dotted date unambiguous. 04.11.2026 does not.
+    assert comparison._numbers("dnia 15.11.2026") == ()
+    assert comparison.texts_match("dnia 15.11.2026", "on 2026-11-15") is True
+    assert comparison.texts_match("dnia 04.11.2026", "on 2026-11-04") is False
+    assert comparison.texts_match("4 listopada 2026", "4. november 2026") is True
+    assert comparison.texts_match("4 listopada 2026", "5 listopada 2026") is False
+
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    report = _report(
+        _analysis(red_flags=[_high_flag("The duty is 1.500 zł.")]),
+        _analysis(red_flags=[_high_flag("The duty is 1500 zł.")]),
+    )
+    assert report["high_severity_disagreements"]
+    held = avatar.cast_vote(
+        {
+            "title": "Duty",
+            "sections": [{"section_id": "s1", "heading": "Duty", "summary": "Duty."}],
+            "model_comparison": report,
+        },
+        _profile(),
+        provider=FakeProvider([json.dumps(_vote("yes"))]),
+    )
+    assert held.section_votes[0].position == "abstain"
+
+
+def test_separator_only_differences_still_agree():
+    """Apostrophes and a resolved decimal comma still match. Bare 1,500 does not."""
+    assert comparison.texts_match("the fee is 1,500", "the fee is 1500") is False
+    assert comparison.texts_match("the fee is 1,50", "the fee is 1.5") is True
+    assert comparison.texts_match("the fee is 1'500", "the fee is 1500") is True
+    assert comparison.texts_match("the fee is 1’500", "the fee is 1500") is True
+    assert comparison.texts_match("the fee is 1,500.00", "the fee is 1500") is True
+    for grouped in ("1 500 zł", "1\u00a0500 zł", "1\u202f500 kr", "1\u2009500 kr"):
+        assert comparison._numbers(grouped) == ("1 500",), grouped
+        assert comparison.texts_match(grouped, "1500 zł" if "zł" in grouped else "1500 kr") is False
+    assert comparison.texts_match("1 500 zł", "1\u00a0500 zł") is True
+
+
+def test_lists_dates_and_versions_are_not_plain_numbers(monkeypatch):
+    assert comparison._numbers("sections 3, 4 and 5") == ("3", "4", "5")
+    assert comparison._numbers("sections 3,4") == ("3.4",)
+    assert comparison.texts_match("sections 3, 4 and 5", "sections 5, 4 and 3") is False
+    assert comparison.texts_match("sections 3, 4 and 5", "sections 3, 4, and 5") is True
+    assert comparison.texts_match("shipped on 2026-11-04", "shipped on 2026-11-05") is False
+    assert comparison.texts_match("build v1.2.3", "build v1.2.4") is False
+    assert comparison.texts_match("build v1.2.3", "build v1.2.3") is True
+    assert comparison.texts_match("build v1.2.3", "sections 1, 2 and 3") is False
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    report = _report(
+        _analysis(red_flags=[_high_flag("It cites sections 3, 4 and 5.")]),
+        _analysis(red_flags=[_high_flag("It cites sections 5, 4 and 3.")]),
+    )
+    assert report["high_severity_disagreements"]
+    result = avatar.cast_vote(
+        {
+            "title": "List",
+            "sections": [{"section_id": "s1", "heading": "List", "summary": "List."}],
+            "model_comparison": report,
+        },
+        _profile(),
+        provider=FakeProvider([json.dumps(_vote("yes"))]),
+    )
+    assert result.section_votes[0].position == "abstain"
+    assert result.section_votes[0].comparison_prior_position == "yes"
+
+
+def test_format_changes_do_not_create_false_agreement(monkeypatch):
+    """Different values, reversed ranges, and shall/shall not still abstain."""
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    pairs = [
+        ("The tax moves from 5 to 10 percent.", "The tax moves from 10 to 5 percent."),
+        ("The agency shall publish the names.", "The agency shall not publish the names."),
+        ("The fee is 1,500.", "The fee is 1.5."),
+        ("The fee is 1.500.", "The fee is 1500."),
+        ("The fee is 1.500.", "The fee is 1.5."),
+        ("Due 04.11.2026.", "Due 2026-11-04."),
+        ("Build v1.2.3.", "Build v1.2.4."),
+    ]
+    for left, right in pairs:
+        report = _report(
+            _analysis(red_flags=[_high_flag(left)]),
+            _analysis(red_flags=[_high_flag(right)]),
+        )
+        assert report["high_severity_disagreements"], (left, right)
+        result = avatar.cast_vote(
+            {
+                "title": "Bill",
+                "sections": [{"section_id": "s1", "heading": "S", "summary": "S."}],
+                "model_comparison": report,
+            },
+            _profile(),
+            provider=FakeProvider([json.dumps(_vote("yes"))]),
+        )
+        assert result.section_votes[0].position == "abstain", (left, right)
+        assert "s1" not in result.would_pass_sections
+
+
+def _abstains(left: str, right: str) -> None:
+    report = _report(
+        _analysis(red_flags=[_high_flag(left)]),
+        _analysis(red_flags=[_high_flag(right)]),
+    )
+    assert report["high_severity_disagreements"], (left, right)
+    result = avatar.cast_vote(
+        {
+            "title": "Bill",
+            "sections": [{"section_id": "s1", "heading": "S", "summary": "S."}],
+            "model_comparison": report,
+        },
+        _profile(),
+        provider=FakeProvider([json.dumps(_vote("yes"))]),
+    )
+    assert result.section_votes[0].position == "abstain", (left, right)
+    assert result.section_votes[0].comparison_prior_position == "yes"
+    assert "s1" not in result.would_pass_sections
+
+
+def test_leading_zero_comma_is_a_decimal_not_thousands(monkeypatch):
+    """Critic: 0,500 must not agree with 500 or with 500%."""
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    assert comparison._numbers("0,500") == ("0.5",)
+    assert comparison._numbers("0,500%") == ("0.5%",)
+    assert comparison.texts_match("the rate is 0,500", "the rate is 0.5") is True
+    assert comparison.texts_match("the rate is 0,500", "the rate is 500") is False
+    assert comparison.texts_match("the rate is 0,500%", "the rate is 500%") is False
+    _abstains("The rate is 0,500.", "The rate is 500.")
+    _abstains("The rate is 0,500%.", "The rate is 500%.")
+
+
+def test_bare_comma_group_of_three_is_ambiguous(monkeypatch):
+    """Critic: bare 1,500 must not agree with 1500. Resolved forms still do."""
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    assert comparison._numbers("1,500") == ("<ambiguous>",)
+    assert comparison._numbers("2,250") == ("<ambiguous>",)
+    assert comparison.texts_match("the fee is 1,500", "the fee is 1500") is False
+    assert comparison.texts_match("the fee is 1,500", "the fee is 1,500") is False
+    assert comparison._numbers("1,500.00") == ("1500",)
+    assert comparison._numbers("1.500,00") == ("1500",)
+    assert comparison._numbers("1,500,000") == ("1500000",)
+    assert comparison._numbers("1.500.000") == ("1500000",)
+    assert comparison.texts_match("the fee is 1,500.00", "the fee is 1500") is True
+    assert comparison.texts_match("the fee is 1.500,00", "the fee is 1500") is True
+    assert comparison.texts_match("the fee is 1,500,000", "the fee is 1500000") is True
+    assert comparison.texts_match("the fee is 1.500.000", "the fee is 1500000") is True
+    _abstains("The fee is 1,500.", "The fee is 1500.")
+    _abstains("The fee is 2,250.", "The fee is 2250.")
+
+
+def test_dotted_citation_abbreviations_do_not_join_even_with_currency(monkeypatch):
+    """Critic: the period in art. must not let zł glue 12 500 into 12500."""
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    assert comparison.texts_match("art. 12 500 zł kary", "art. 12500 zł kary") is False
+    assert comparison._numbers("art. 12 500 zł kary") == ("12 500",)
+    _abstains("art. 12 500 zł kary", "art. 12500 zł kary")
+    for marker in ("art", "ust", "pkt", "sec", "nr", "lit", "poz", "ledd"):
+        for written in (f"{marker}. 12 500 zł", f"{marker}.12 500 zł", f"{marker} 12 500 zł"):
+            assert comparison.texts_match(written, "12500 zł") is False, written
+            assert comparison._numbers(written) == ("12 500",), written
+    assert comparison._numbers("§ 3 500 zł") == ("3 500",)
+    assert comparison._numbers("§3 500 zł") == ("3 500",)
+    assert comparison.texts_match("§ 3 500 zł", "3500 zł") is False
+    assert comparison.texts_match("Art. 12 500 ZŁ", "12500 zł") is False
+    assert comparison.texts_match("1 500 zł", "1500 zł") is False
+
+
+def test_leading_zero_comma_with_a_long_fraction_matches_the_classifier():
+    assert comparison._numbers("0,5000") == ("0.5",)
+    assert comparison.texts_match("the rate is 0,5000", "the rate is 0.5") is True
+    assert comparison.texts_match("the rate is 0,5000", "the rate is 5000") is False
+
+
+def test_zloty_stays_one_token():
+    assert comparison._tokens("zł") == {"zł"}
+
+
+_CITATION_MARKERS = (
+    "art",
+    "kap",
+    "rozdz",
+    "no",
+    "No",
+    "par",
+    "Abs",
+    "tit",
+    "§",
+    "ledd",
+    # Made-up abbreviations, one through five letters. The split does not
+    # depend on the word being on a list.
+    "q",
+    "zx",
+    "bqq",
+    "wxyz",
+    "abcde",
+)
+
+
+@pytest.mark.parametrize("marker", _CITATION_MARKERS)
+@pytest.mark.parametrize("period", ("", "."))
+def test_any_abbreviation_space_group_abstains_against_the_joined_form(monkeypatch, marker, period):
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    left = f"{marker}{period} 12 500 zł"
+    right = f"{marker}{period} 12500 zł"
+    assert comparison._numbers(left) == ("12 500",)
+    assert comparison._numbers(right) == ("12500",)
+    assert comparison.texts_match(left, right) is False
+    _abstains(left, right)
+
+
+@pytest.mark.parametrize("dash", ("-", "\u2013"))
+def test_hyphenated_range_abstains_against_the_joined_form(monkeypatch, dash):
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    left = f"art. 12{dash}14 500 zł"
+    right = f"art. 12{dash}14500 zł"
+    assert comparison._numbers(left) == ("12", "14 500")
+    assert comparison._numbers(right) == ("12", "14500")
+    assert comparison.texts_match(left, right) is False
+    _abstains(left, right)
+    assert comparison.texts_match(left, f"art. 12{dash}14 500 zł") is True
+
+
+@pytest.mark.parametrize("gap", ("\n", "\r\n", "\t"))
+def test_line_broken_groups_abstain_against_the_joined_form(monkeypatch, gap):
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    left = f"12{gap}500 zł"
+    assert comparison._numbers(left) == ("12 500",)
+    assert comparison.texts_match(left, "12500 zł") is False
+    _abstains(left, "12500 zł")
+
+
+@pytest.mark.parametrize(
+    "marked,bare",
+    (
+        ("§ 1 000 kr", "1 000 kr"),
+        ("§§ 1 000", "1 000"),
+        ("§1 000", "1 000"),
+        ("№ 1 000", "1 000"),
+        ("# 1 000", "1 000"),
+        ("(1 000", "1 000"),
+        ("я 1 000", "1 000"),
+    ),
+)
+def test_signs_outside_a_number_abstain_against_the_bare_amount(monkeypatch, marked, bare):
+    """A sign the old token pattern dropped must not disappear into a yes."""
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    assert comparison._high_claims_agree(marked, bare) is False
+    _abstains(marked, bare)
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    (
+        ("The fee is 1 000 kr.", "The fee is 1 000 kr"),
+        ("The fee is 1 000 kr!", "The fee is 1 000 kr?"),
+        ('The fee is "1 000 kr"', "The fee is 1 000 kr"),
+        ("The fee is ‘1 000 kr’", "The fee is 1 000 kr"),
+        ("The well-known fee is 1 000 kr.", "The well known fee is 1 000 kr"),
+        ("The fee is 1 000 kr;", "The fee is 1 000 kr:"),
+    ),
+)
+def test_sentence_punctuation_alone_still_matches(left, right):
+    assert comparison.texts_match(left, right) is True
+    assert comparison._high_claims_agree(left, right) is True
+
+
+def test_zero_width_space_is_not_a_grouping_gap():
+    assert comparison._numbers("12\u200b500") == ("12", "500")
+    assert comparison.texts_match("12\u200b500 zł", "12 500 zł") is False
+    assert comparison.texts_match("12\u200b500 zł", "12500 zł") is False
+
+
+@pytest.mark.parametrize(
+    "gap",
+    (" ", "\u00a0", "\u202f", "\u2009", "\n", "\t", "\r\n"),
+)
+def test_identical_space_groups_match(gap):
+    grouped = f"12{gap}500 zł"
+    assert comparison._numbers(grouped) == ("12 500",)
+    assert comparison.texts_match(grouped, "12 500 zł") is True
+    assert comparison.texts_match(grouped, "12500 zł") is False
+    assert comparison.texts_match("12 500 zł", "1 2500 zł") is False
+    assert comparison.texts_match("12 500 zł", "012 500 zł") is False
+
+
+def test_space_groups_do_not_merge_citations(monkeypatch):
+    """A space-grouped amount is not the joined integer, with or without a unit."""
+    monkeypatch.setattr(avatar, "MULTI_MODEL_CHECK", False)
+    monkeypatch.setattr(avatar, "DELEGATE_DRIFT_CHECK", False)
+    assert comparison._numbers("Articles 1 500") == ("1 500",)
+    assert comparison._numbers("§ 3 500") == ("3 500",)
+    assert comparison._numbers("1 500 zł") == ("1 500",)
+    assert comparison._numbers("1 500 kr") == ("1 500",)
+    assert comparison.texts_match("Articles 1 500", "Articles 1500") is False
+    assert comparison.texts_match("§ 3 500", "§ 3500") is False
+    assert comparison.texts_match("1 500 zł", "1500 zł") is False
+    assert comparison.texts_match("1 500 kr", "1500 kr") is False
+    _abstains("See Articles 1 500.", "See Articles 1500.")
+    _abstains("See § 3 500.", "See § 3500.")
+    _abstains("The fee is 1 500 zł.", "The fee is 1500 zł.")
+
+
+def test_same_vendor_family_is_refused(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(config, "OPENAI_MODEL", "gpt-4o")
+    monkeypatch.setattr(config, "COMPARISON_PROVIDER", "openai")
+    monkeypatch.setattr(config, "COMPARISON_MODEL", "gpt-4o-mini")
     with pytest.raises(llm.LLMConfigError, match="not an independent check"):
         comparison.analyze_for_api("Sec. 101. A short bill about taxes and rates.")
 
