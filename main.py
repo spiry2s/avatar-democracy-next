@@ -56,6 +56,7 @@ from backend import (
     population,
     profile as profile_mod,
     questionnaire,
+    summarizer,
 )
 from backend.bill_fetch import BillSourceError
 
@@ -880,6 +881,9 @@ async def analyze(
     # Run the analysis
     try:
         analysis = comparison.analyze_for_api(bill_text)
+    except summarizer.BillOversizeError as e:
+        # The cap refused the bill before any model call. 413, not a parse error.
+        raise HTTPException(status_code=413, detail=str(e)) from e
     except llm.LLMTruncatedError as e:
         # A cut-off reply is not unparseable JSON. Say so.
         raise HTTPException(status_code=502, detail=str(e)) from e

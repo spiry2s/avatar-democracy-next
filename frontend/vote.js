@@ -16,6 +16,7 @@ const resultsEl = document.getElementById('results');
 let activeTab = 'upload';
 let selectedFile = null;
 let currentVote = null;
+let excerptNote = '';
 
 // ── Check profile exists ──────────────────────────────────────────────────────
 
@@ -84,6 +85,8 @@ voteBtn.addEventListener('click', async () => {
     const aRes = await apiFetch('/api/analyze', { method: 'POST', body: fd });
     if (!aRes.ok) throw new Error((await aRes.json()).detail || `Analyze failed (HTTP ${aRes.status})`);
     const analysis = (await aRes.json()).analysis;
+    const truncation = analysis.truncation || {};
+    excerptNote = truncation.truncated && !truncation.blocking ? oversizeNote(truncation) : '';
 
     // Step 2: vote
     setStatus(true, 'Your Avatar is voting…', 'Applying your delegates, values, and compass to each section.');
@@ -199,10 +202,26 @@ function renderSection(v, idx) {
   </div>`;
 }
 
+function oversizeNote(t) {
+  if (t && t.message) return t.message;
+  const original = Number(t && t.original_chars) || 0;
+  const analyzed = Number(t && t.analyzed_chars) || 0;
+  if (original > 0 && analyzed > 0 && analyzed < original) {
+    let pct = Math.round((100 * analyzed) / original);
+    if (pct <= 0) pct = 1;
+    if (pct >= 100) pct = 99;
+    return `This bill is very long; only the first ${pct}% was analyzed.`;
+  }
+  return 'This bill is very long; only part of it was analyzed.';
+}
+
 function renderVoteBanner(vote) {
   const el = document.getElementById('vote-banner');
   if (!el) return;
   const parts = [];
+  if (excerptNote && !vote.truncation_blocking) {
+    parts.push(`<div class="grounding-banner warning">${escHtml(excerptNote)}</div>`);
+  }
   if (vote.truncation_blocking) {
     parts.push(`<div class="grounding-banner blocking"><strong>No yes or no vote.</strong> ${escHtml(vote.blocking_reason || vote.recommendation || 'The bill was truncated.')}</div>`);
   }

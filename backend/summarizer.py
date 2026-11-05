@@ -20,6 +20,8 @@ from backend import config, llm
 from backend.grounding import (
     BILL_DATA_BEGIN,
     BILL_DATA_END,
+    TRUNCATION_MARKER,
+    _heading_matches,
     apply_grounding,
     plan_passes,
     shield_delimiters,
@@ -28,6 +30,25 @@ from backend.grounding import (
 
 MAX_SINGLE_PASS_CHARS = 200_000
 _SCHEMA_ATTEMPTS = 2
+# How far before the cap a section or paragraph break may sit. A break
+# farther back would drop too much of the allowed excerpt.
+_EXCERPT_LOOKBACK = 8_000
+_EXCERPT_BANNER = (
+    "[EXCERPT] The text below is only the beginning of a longer bill. "
+    "The rest was not sent for analysis.\n\n"
+)
+
+
+class BillOversizeError(Exception):
+    """The bill is over the input cap and the mode is reject.
+
+    Raised before any model call. The HTTP layer maps it to 413.
+    """
+
+    def __init__(self, message: str, *, original_chars: int, limit: int):
+        super().__init__(message)
+        self.original_chars = original_chars
+        self.limit = limit
 
 
 @dataclass
@@ -318,6 +339,108 @@ def _merge(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _percent_analyzed(analyzed: int, original: int) -> int:
+    """Whole-number percent of the bill that was sent. Never 0 or 100 when cut."""
+    if original <= 0 or analyzed >= original:
+        return 100
+    percent = (100 * analyzed + original // 2) // original
+    if percent <= 0:
+        return 1
+    if percent >= 100:
+        return 99
+    return percent
+
+
+def oversize_message(analyzed: int, original: int) -> str:
+    """The note shown when only an excerpt of the bill was analyzed."""
+    percent = _percent_analyzed(analyzed, original)
+    return f"This bill is very long; only the first {percent}% was analyzed."
+
+
+def _excerpt_end(text: str, limit: int) -> int:
+    """Where the excerpt ends. At or before `limit`, on a boundary when one is close.
+
+    A section heading in the lookback window wins, then a blank line, then a
+    newline. Otherwise the cut is the cap itself. The result is at least 1
+    when the cap is positive, so the model is not handed an empty bill.
+    """
+    if limit <= 0:
+        return 0
+    if len(text) <= limit:
+        return len(text)
+    window_start = max(0, limit - _EXCERPT_LOOKBACK)
+    headings = [
+        match.start()
+        for match in _heading_matches(text)
+        if window_start < match.start() <= limit
+    ]
+    if headings:
+        return headings[-1]
+    paragraph = text.rfind("\n\n", window_start, limit)
+    if paragraph > 0:
+        return paragraph
+    newline = text.rfind("\n", window_start, limit)
+    if newline > 0:
+        return newline
+    return limit
+
+
+def limit_bill_text(text: str) -> tuple[str, dict[str, int] | None]:
+    """The only input cap applied before a bill is sent for analysis.
+
+    Text, file, and URL inputs all arrive here as already-extracted text.
+    Under the cap, the text is unchanged and the second value is None.
+    Over the cap, `truncate` returns a prefix (no banner yet) and records
+    the original length. `reject` raises BillOversizeError and does not
+    build a provider.
+    """
+    limit = config.max_bill_chars()
+    original = len(text)
+    if original <= limit:
+        return text, None
+    if config.oversize_mode() == "reject":
+        raise BillOversizeError(
+            f"This bill is {original} characters, over the {limit}-character limit. "
+            "It was not sent for analysis. Raise AVATAR_MAX_BILL_CHARS, or set "
+            "AVATAR_OVERSIZE_MODE=truncate to analyze an excerpt of the beginning.",
+            original_chars=original,
+            limit=limit,
+        )
+    cut = _excerpt_end(text, limit)
+    return text[:cut], {"original_chars": original, "limit": limit}
+
+
+def _mark_excerpt(
+    chunks: list[str],
+    truncation: dict[str, Any],
+    cap_info: dict[str, int],
+) -> tuple[list[str], dict[str, Any]]:
+    """Tell the model the chunk is an excerpt, and record that on the result.
+
+    The banner and the length marker are not part of the bill. Character
+    counts and covered ranges stay on the original prefix plan_passes saw.
+    """
+    marked = list(chunks)
+    if marked and not marked[-1].endswith(TRUNCATION_MARKER):
+        marked[-1] = marked[-1] + TRUNCATION_MARKER
+    if marked:
+        marked[0] = _EXCERPT_BANNER + marked[0]
+    analyzed = int(truncation.get("analyzed_chars") or 0)
+    original = int(cap_info["original_chars"])
+    note = oversize_message(analyzed, original)
+    prior = truncation.get("message") or ""
+    if truncation.get("blocking") and prior:
+        message = f"{note} {prior}"
+    else:
+        message = note
+    updated = dict(truncation)
+    updated["original_chars"] = original
+    updated["analyzed_chars"] = analyzed
+    updated["truncated"] = True
+    updated["message"] = message
+    return marked, updated
+
+
 def analyze_bill(
     bill_text: str,
     provider: llm.LLMProvider | None = None,
@@ -337,6 +460,8 @@ def analyze_bill(
     Raises:
         ValueError: If bill text is empty, or the response is not JSON matching
             the schema after one retry.
+        BillOversizeError: the bill is over AVATAR_MAX_BILL_CHARS and
+            AVATAR_OVERSIZE_MODE is reject. No model call is made.
         llm.LLMTruncatedError: the model stopped for length or returned no text.
             The partial reply is not parsed.
         llm.LLMConfigError: If the provider is not configured. This is a
@@ -346,9 +471,16 @@ def analyze_bill(
     if not bill_text or not bill_text.strip():
         raise ValueError("Bill text is empty")
 
+    # One gate for pasted text, uploads, and official URLs. Comparison and
+    # the schema retry both call back through here, so they see this same text.
+    capped, cap_info = limit_bill_text(bill_text)
+
     provider = llm.resolve(provider, "primary")
+    # None means the configured output budget. Comparison passes its own.
     budget = config.LLM_MAX_TOKENS if max_tokens is None else max_tokens
-    chunks, truncation = plan_passes(bill_text, MAX_SINGLE_PASS_CHARS)
+    chunks, truncation = plan_passes(capped, MAX_SINGLE_PASS_CHARS)
+    if cap_info is not None:
+        chunks, truncation = _mark_excerpt(chunks, truncation, cap_info)
     payloads = [
         _request_valid(
             provider,

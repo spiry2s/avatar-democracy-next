@@ -63,8 +63,32 @@ OPENAI_TIMEOUT = _float_env("OPENAI_TIMEOUT", 600.0)
 # Output budget for one model call. Reasoning models spend this on reasoning
 # tokens before they emit JSON, so 8000 is not enough for them. Comparison
 # has its own knob and does not fall back to a smaller hidden default.
+# Every analysis call sends one of these as max_tokens. Neither path is unbounded.
 LLM_MAX_TOKENS = _positive_int_env("LLM_MAX_TOKENS", 32000)
 COMPARISON_MAX_TOKENS = _positive_int_env("COMPARISON_MAX_TOKENS", 32000)
+
+# Per-bill input cap, about 15k tokens. A pasted omnibus bill can be hundreds
+# of thousands of characters; sending all of it costs dollars and can miss
+# the context window. Read at analysis time so a process can change it
+# without a re-import. Non-integers and non-positive values keep the default.
+DEFAULT_MAX_BILL_CHARS = 60_000
+
+
+def max_bill_chars() -> int:
+    """Character cap for one bill before it is sent for analysis."""
+    return _positive_int_env("AVATAR_MAX_BILL_CHARS", DEFAULT_MAX_BILL_CHARS)
+
+
+def oversize_mode() -> str:
+    """What to do when a bill is over `max_bill_chars`.
+
+    `truncate` (default) analyzes a marked excerpt of the beginning.
+    `reject` refuses the bill. Anything else is treated as `truncate`.
+    """
+    raw = (os.environ.get("AVATAR_OVERSIZE_MODE") or "truncate").strip().lower()
+    if raw in {"reject", "truncate"}:
+        return raw
+    return "truncate"
 
 # Endorsement thresholds by bill scope (white paper decision 8).
 # Real numbers for a US-sized population: ~50,000 ordinary, ~500,000 major,

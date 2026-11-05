@@ -445,6 +445,19 @@ function flagList(title, rows, side) {
   </div>`).join('')}</div>`;
 }
 
+function oversizeNote(t) {
+  if (t && t.message) return t.message;
+  const original = Number(t && t.original_chars) || 0;
+  const analyzed = Number(t && t.analyzed_chars) || 0;
+  if (original > 0 && analyzed > 0 && analyzed < original) {
+    let pct = Math.round((100 * analyzed) / original);
+    if (pct <= 0) pct = 1;
+    if (pct >= 100) pct = 99;
+    return `This bill is very long; only the first ${pct}% was analyzed.`;
+  }
+  return 'This bill is very long; only part of it was analyzed.';
+}
+
 function renderGroundingBanner(a) {
   const el = document.getElementById('grounding-banner');
   if (!el) return;
@@ -452,6 +465,8 @@ function renderGroundingBanner(a) {
   const t = a.truncation || {};
   if (t.blocking) {
     blocks.push(`<div class="grounding-banner blocking"><strong>Incomplete analysis.</strong> ${escHtml(t.message || 'The bill was truncated.')}</div>`);
+  } else if (t.truncated) {
+    blocks.push(`<div class="grounding-banner warning">${escHtml(oversizeNote(t))}</div>`);
   } else if (t.chunked) {
     blocks.push(`<div class="grounding-banner info">${escHtml(t.message || 'The bill was analyzed in sections.')}</div>`);
   }
