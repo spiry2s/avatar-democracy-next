@@ -4,6 +4,8 @@ Local prototype of an AI-mediated legislative process: plain-language bill analy
 
 The proposal is written up in [ai_avatar_democracy_v1.1.md](ai_avatar_democracy_v1.1.md). What changed since v1.0 is in [CHANGES-v1.1.md](CHANGES-v1.1.md). [ai_avatar_democracy_v1.0.md](ai_avatar_democracy_v1.0.md) (rendered copy: [ai_avatar_democracy_v1.0.html](ai_avatar_democracy_v1.0.html)) is kept for history. Earlier drafts are `ai_proxy_democracy_v0.1.md` through `ai_proxy_democracy_v0.4.md`.
 
+The one-page project site is [docs/site](docs/site/README.md). It is static HTML and CSS, separate from this local app. Deploy steps for Vercel are in that README.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Tests](https://github.com/spiry2s/avatar-democracy/actions/workflows/tests.yml/badge.svg)](https://github.com/spiry2s/avatar-democracy/actions/workflows/tests.yml)
@@ -309,6 +311,8 @@ avatar-democracy/
 │       ├── icon-192.png
 │       ├── icon-512.png
 │       └── icon-maskable-512.png
+├── docs/
+│   └── site/                    # Static project page, not the local app. See docs/site/README.md
 ├── tests/
 │   ├── test_bills.py
 │   ├── test_chamber.py

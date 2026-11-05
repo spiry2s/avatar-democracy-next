@@ -1,6 +1,6 @@
 # Project page
 
-Static one-page site for Avatar Democracy. It is HTML and CSS in this directory (`index.html`, `style.css`, `favicon.svg`). There is no build step, no JavaScript, and no request to a font host, CDN, analytics service, or other third party. The page sets no cookies.
+Static one-page site for Avatar Democracy. It is HTML and CSS in this directory (`index.html`, `style.css`, `favicon.svg`). There is no build step, no JavaScript, and no request to a font host, CDN, analytics service, or other third party. The page sets no cookies. `vercel.json` configures that static host. `.vercelignore` keeps this README out of the upload.
 
 Nothing here is deployed. No host, form, or mailing list is connected. Do not connect one until the project owner approves it.
 
@@ -17,7 +17,18 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080). Python 3.10 or newer, which
 
 ## Hosting
 
-The page can stay in the repo with no host at all. Publishing it is a separate decision.
+The page can stay in the repo with no host at all. Publishing it is a separate decision. Nothing in this repository creates a host project or promotes a deployment.
+
+**Vercel.** After the project owner approves a host, create one Vercel project for this repository:
+
+1. Set the Root Directory to `docs/site`. That directory is this page. The repository root is the local prototype (`python main.py`) and is the wrong root.
+2. Set the framework preset to **Other**.
+3. Set no build command. Leave the field empty.
+4. Deploy, then open the preview URL and read the page before promoting that deployment to production.
+
+`vercel.json` records the same choices: `"framework": null` is the Other preset, and `"buildCommand": ""` skips the build (`null` would auto-detect one). `cleanUrls` is on. Every response gets a Content-Security-Policy of `default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`, plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, and a Permissions-Policy of `camera=(), microphone=(), geolocation=()`. The page has no scripts and no inline style, which is why `script-src` is `'none'` and `style-src` is `'self'` only. `.vercelignore` excludes this README so these notes are not served as a page.
+
+Connecting Vercel to a private repository gives that host access to the repo. The preview URL is reachable by anyone who has it, even while GitHub stays private. Leave analytics and cookie banners off. Turning them on adds third-party requests and cookies, which this page does not have.
 
 **GitHub Pages, from `/docs/site`.** Prefer a Pages workflow, or a branch whose root is this directory, so the site root is `index.html` and not the parent `docs/` folder. GitHub's "Deploy from a branch" setting only offers the repository root or `/docs`. Choosing `/docs` on `main` would publish this page at `/site/` and would also publish this README.
 
