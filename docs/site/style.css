@@ -1,0 +1,165 @@
+/* Avatar Democracy project page. Local files only: no fonts, no images from the network. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+:root {
+  --bg: #f7f4ee;
+  --ink: #1b1714;
+  --link: #082f58;
+  --rule: #6f675c;
+  --note: #ebe4d6;
+  --focus: #082f58;
+}
+
+html { font-size: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+  font-size: 1.0625rem;
+  line-height: 1.55;
+  overflow-wrap: break-word;
+}
+
+.skip {
+  position: absolute;
+  left: 0.75rem;
+  top: 0.75rem;
+  padding: 0.4rem 0.7rem;
+  background: var(--ink);
+  color: var(--bg);
+  transform: translateY(-200%);
+  z-index: 1;
+}
+
+.skip:focus {
+  transform: none;
+}
+
+.wrap {
+  width: min(66ch, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+.mast {
+  border-bottom: 1px solid var(--rule);
+}
+
+.mast .wrap { padding-block: 0.9rem; }
+
+.name {
+  margin: 0;
+  font-size: 0.8rem;
+  font-variant: small-caps;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+}
+
+main { padding-bottom: 2.5rem; }
+
+h1 {
+  margin: 1.75rem 0 0.9rem;
+  font-size: clamp(1.7rem, 1.15rem + 2.2vw, 2.45rem);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+
+h2 {
+  margin: 2.4rem 0 0.7rem;
+  font-size: 1.28rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+p { margin: 0.75rem 0; }
+
+.lede { font-size: 1.15rem; line-height: 1.45; }
+
+a {
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.16em;
+}
+
+a:visited { color: var(--link); }
+
+a:hover { text-decoration-thickness: 2px; }
+
+a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.actions, .colophon {
+  list-style: none;
+  margin: 1.15rem 0 0;
+  padding: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+}
+
+.actions a, .colophon a {
+  display: inline-block;
+  padding-block: 0.7rem;
+}
+
+ul:not(.actions):not(.colophon) {
+  margin: 0.75rem 0 0;
+  padding-left: 1.2rem;
+}
+
+li + li { margin-top: 0.75rem; }
+
+.actions li + li, .colophon li + li { margin-top: 0; }
+
+.note {
+  margin-top: 2.4rem;
+  padding: 0.2rem 1rem 1rem;
+  background: var(--note);
+  border-left: 4px solid var(--ink);
+}
+
+.note h2 { margin-top: 0.9rem; }
+
+code {
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+footer {
+  border-top: 1px solid var(--rule);
+  padding-bottom: 2rem;
+}
+
+.colophon {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  font-size: 0.95rem;
+}
+
+@media (max-width: 36rem) {
+  .wrap { width: min(66ch, calc(100% - 1.5rem)); }
+  .actions, .colophon { flex-direction: column; align-items: flex-start; gap: 0; }
+  .actions a, .colophon a { padding-block: 0.55rem; }
+}
+
+@media (forced-colors: active) {
+  .note { border-left-color: CanvasText; }
+  a:focus-visible { outline-color: Highlight; }
+}
+
+@media print {
+  .skip { display: none; }
+  body { background: #fff; color: #000; }
+  a { color: #000; }
+  .note { background: transparent; }
+}

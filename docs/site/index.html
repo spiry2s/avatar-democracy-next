@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Avatar Democracy</title>
+  <meta name="description" content="Open-source tools that help citizens read the bills that affect them. An early local prototype. The white paper is a working document, open to critique.">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="mast">
+    <div class="wrap">
+      <p class="name">Avatar Democracy</p>
+    </div>
+  </header>
+  <main id="content">
+    <div class="wrap">
+      <h1>Bringing direct democracy into the 21st century</h1>
+      <p class="lede">Open-source tools that help citizens read the bills that affect them. The Avatar demo explores taking part in decisions issue by issue, with every step visible and every vote open to the citizen's own override.</p>
+      <ul class="actions">
+        <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/ai_avatar_democracy_v1.1.md">Read the white paper</a></li>
+        <li><a href="https://github.com/spiry2s/avatar-democracy">See the code on GitHub</a></li>
+      </ul>
+
+      <section id="analyzer">
+        <h2>What the bill analyzer does today</h2>
+        <p>Paste a bill, give a URL, or upload a PDF. You get:</p>
+        <ul>
+          <li><strong>A plain-language summary</strong> and a section-by-section breakdown.</li>
+          <li><strong>A quote for every claim.</strong> The model has to cite verbatim text from the bill for each section summary, red flag and beneficiary claim. The tool checks that the quote really appears in the bill. If it doesn't, the claim is withheld and marked, not shown as fact.</li>
+          <li><strong>An optional second opinion from another vendor.</strong> If you configure a second provider (for example an OpenAI-compatible model next to the default Claude), the same analysis runs on both. You then see where they differ: sections, red flags, and who gains or loses. No third model picks a winner.</li>
+        </ul>
+      </section>
+
+      <section id="caution">
+        <h2>Caution when they disagree</h2>
+        <p>This belongs to the Avatar demo, not the general bill analyzer. The analyzer shows where the two models differ and does not cast a vote. On the Avatar demo, if the two models disagree on a serious red flag, the Avatar vote for that section is held as "abstain" by default, so it adds neither a yes nor a no.</p>
+      </section>
+
+      <section class="note" id="honest-note">
+        <h2>An honest note: this is an early prototype</h2>
+        <ul>
+          <li>It runs locally (<code>python main.py</code>) and needs your own API key. The second-vendor check is off unless you switch it on.</li>
+          <li>Language models can still misread legal text. A quote shows you where to look; it doesn't prove the summary is right. Always read the bill itself. This isn't legal advice.</li>
+          <li>The Avatar, bill-lifecycle and "chamber" pages are a demo. The chamber is a synthetic population, not real voters.</li>
+          <li>The white paper is a working document, open to critique, with its open problems listed in the paper itself.</li>
+        </ul>
+      </section>
+
+      <section id="critique">
+        <h2>Help us find what's broken</h2>
+        <p>If you study democratic institutions, machine-learning bias, verification, or law, or if you run participation programmes, we want your critique on <a href="https://github.com/spiry2s/avatar-democracy/issues">GitHub Issues</a>. Who can see that feedback depends on who can see the repository: it is public if the repository is public, and while the repository is private only collaborators can see it.</p>
+      </section>
+
+      <section id="nonpartisan">
+        <h2>Nonpartisan by design</h2>
+        <p>Avatar Democracy isn't affiliated with, funded by, or run for any political party, candidate or campaign. The analyzer's prompts tell it to avoid partisan framing and are published for anyone to review. Any party may use the code under the MIT license, but none speaks for the project.</p>
+      </section>
+    </div>
+  </main>
+  <footer>
+    <div class="wrap">
+      <nav aria-label="Project">
+        <ul class="colophon">
+          <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/ai_avatar_democracy_v1.1.md">White paper v1.1</a></li>
+          <li><a href="https://github.com/spiry2s/avatar-democracy">Code</a></li>
+          <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/LICENSE">MIT License</a></li>
+        </ul>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
