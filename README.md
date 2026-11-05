@@ -15,7 +15,7 @@ The proposal is written up in [ai_avatar_democracy_v1.1.md](ai_avatar_democracy_
 | Page | What it does |
 | --- | --- |
 | `/` | Landing page |
-| `/analyze` | Bill summary and red-flag analysis from pasted text, a URL, or a PDF |
+| `/analyze` | Bill summary and red-flag analysis from pasted text, an official bill link, or a PDF |
 | `/avatar` | Compass questionnaire, values statement, per-issue delegates, recorded positions |
 | `/vote` | Analyze a bill, then cast the Avatar's per-section vote. Overrides update the page and the audit log |
 | `/bills` | Draft, version, endorse, cool off, then a per-section chamber vote |
@@ -100,6 +100,35 @@ Loopback does not ask for a token. It is protected by a Host allowlist and the s
 **Use this only on a trusted private Wi-Fi network. Never use it on public or shared Wi-Fi.** Anyone on that network who has the token can run analyses and votes, and that spends your configured API keys. Analysing an untrusted bill file still sends its text to the model providers. The token is a shared password for this process, not an account system, and it does not make a public network safe. Press Ctrl+C in the terminal to stop. It is still the local process on your machine.
 
 A service worker caches only the static shell (pages, CSS, scripts, and icons) and only when the page is served over https or from localhost. It does not cache `/api` or any analysis or vote response, and it asks the network for HTML first so a new release shows up. When a new shell is waiting, the page offers a reload. Over plain `http://` on a LAN address the pages and the home-screen icon still work; the worker simply does not install.
+
+## Paste a bill link
+
+On `/analyze`, next to the PDF upload, paste an `https` link. The same `url` field on `POST /api/analyze` fetches the document and runs it through the analysis pipeline used for an uploaded file. The field is optional. Pasted text and PDF upload are unchanged.
+
+Only the hosts in `OFFICIAL_BILL_HOSTS` (`backend/bill_fetch.py`) are fetched. The match is the exact hostname. A subdomain, a suffix, a look-alike, or any other site is rejected with a message that tells you to download the file and upload it. There is no environment variable that adds a host.
+
+| Publisher | Hosts |
+| --- | --- |
+| Sejm | `api.sejm.gov.pl`, `www.sejm.gov.pl`, `orka.sejm.gov.pl` |
+| ISAP | `isap.sejm.gov.pl` |
+| Stortinget | `www.stortinget.no`, `data.stortinget.no` |
+| Lovdata | `lovdata.no` |
+| Congress | `www.congress.gov`, `api.congress.gov` |
+
+`www.lovdata.no`, `congress.gov`, `sejm.gov.pl`, and `stortinget.no` are not in that set. Add the exact hostname if you want one of them.
+
+The fetch is https on port 443 only. Userinfo, any other port, a trailing dot, a percent-encoded hostname, an IP address, and a non-ASCII character anywhere in the URL are rejected. Percent-encode a path or a query that needs a character outside ASCII. DNS is resolved in this process. Private, loopback, link-local, multicast, reserved, and IPv4-mapped IPv6 addresses are not connected to. The socket is opened to the address that passed that check, with the TLS name and the `Host` header set to the official hostname, so a DNS change between the check and the connect does not retarget the request. Redirects are followed by the app, at most three, and every hop is checked again. A redirect off the list is rejected. `HTTP_PROXY`, `HTTPS_PROXY`, and the other proxy variables are not used.
+
+The download stops at about 15 MB while the body is being read, not only when `Content-Length` says so. The connect and the read share a budget of about 10 seconds. HTML, PDF, and plain text are accepted. Anything else is rejected. HTML is reduced to text: scripts, styles, and navigation are dropped, and the page renders that text as text. PDFs are read with pypdf (`pypdf` in `requirements.txt`), with a page cap and a character cap. A PDF whose text is empty or only a few characters is reported as having no text layer; upload a text file instead.
+
+The `url` field is on `POST /api/analyze`, which already spends a model call. On a non-loopback bind it requires `X-Access-Token`, the Host and Origin checks, `multipart/form-data`, and the shared spending-route rate limit. Loopback does not require the token. The same Host and Origin checks still apply.
+
+### Add a source
+
+1. Add the exact lowercase hostname to `OFFICIAL_BILL_HOSTS` in `backend/bill_fetch.py`. Do not add a wildcard, a suffix, or an IP address.
+2. Confirm the site serves the bill over https on port 443 as HTML, PDF, or plain text.
+3. Add that hostname to the acceptance list in `tests/test_bill_fetch.py`, and keep a rejection test for a subdomain or look-alike that is not on the list.
+4. Mention the host in the table above. The analyzer page's "Supported sources" hint names the publishers; change it if the new host is a new publisher.
 
 ## Run the tests
 
@@ -245,7 +274,8 @@ avatar-democracy/
 │   ├── grounding.py             # Quote checks, JSON shape, fences, truncation
 │   ├── comparison.py            # Second-family analysis, disagreement report, vote policy
 │   ├── summarizer.py            # Bill-analysis prompt and primary-role model call
-│   ├── extractors.py            # Pasted text, URL (HTML or PDF), uploaded PDF
+│   ├── bill_fetch.py            # Official-host allowlist and pinned https fetch
+│   ├── extractors.py            # Pasted text, official URL (HTML or PDF), uploaded PDF
 │   ├── avatar.py                # Avatar vote, second Claude pass, drift check
 │   ├── profile.py               # Compass, values, delegates, recorded positions
 │   ├── questionnaire.py         # Six-axis seeding questionnaire
@@ -289,7 +319,8 @@ avatar-democracy/
 │   ├── test_llm.py              # Fake-provider coverage of every model call site
 │   ├── test_comparison.py       # OpenAI-compatible HTTP shape, disagreement, vote policy
 │   ├── test_mobile.py           # Manifest, icons, viewport, service worker, bind host
-│   └── test_lan_access.py       # LAN token, origin check, content type, banner
+│   ├── test_lan_access.py       # LAN token, origin check, content type, banner
+│   └── test_bill_fetch.py       # Official bill links, SSRF checks, no live network
 ├── ai_avatar_democracy_v1.1.md  # Current white paper
 ├── CHANGES-v1.1.md              # Changes since v1.0
 ├── ai_avatar_democracy_v1.0.md  # Kept for history
@@ -304,7 +335,7 @@ The prompts the running app sends are the constants in `backend/summarizer.py`, 
 
 ## What the prototype implements
 
-- Text extraction from a paste, a URL, or a PDF, then a model call (Anthropic by default) that must return JSON in a fixed shape: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions. Section summaries, red flags, and beneficiary claims are grounded findings only when a verbatim quote occurs in the bill. The rest is returned and labeled ungrounded. A configured comparison provider runs that same prompt, schema, and quote check on a second model, and the page shows where they disagree. See Limits.
+- Text extraction from a paste, an official bill link, or a PDF, then a model call (Anthropic by default) that must return JSON in a fixed shape: plain summary, sections, who benefits and who pays, red flags, comparable laws, and open questions. Section summaries, red flags, and beneficiary claims are grounded findings only when a verbatim quote occurs in the bill. The rest is returned and labeled ungrounded. A configured comparison provider runs that same prompt, schema, and quote check on a second model, and the page shows where they disagree. See Limits.
 - One local citizen profile: a six-axis compass from twelve Likert questions, a free-text values statement, and per-issue delegates. Adding a delegate waits out a cooling-off period before the Avatar follows it. Revoking a delegate is immediate. A delegate can carry recorded positions, which the vote prompt is told to cite.
 - A per-section Avatar vote. The prompt's order is delegate, then values, then compass, otherwise abstain. When `MULTI_MODEL_CHECK` is on, a second Claude pass flags sections where its position differs. When a comparison provider is configured and the analyses disagree on a high-severity red flag, the Avatar abstains on that section (or flags it for human review, if `COMPARISON_VOTE_POLICY=review`). When `DELEGATE_DRIFT_CHECK` is on, sections attributed to a grounded delegate can be flagged against that delegate's recorded text.
 - A bill path of draft, new versions while still a draft, open for endorsement, freeze once a threshold is met, cooling-off, then voting. An emergency bill uses a higher threshold and a shorter cooling-off. On freeze the server can ask the checker role whether the bill conflicts with bills already marked passed.
@@ -315,7 +346,7 @@ Endorsements beyond the local operator are a demo counter on the bill (`simulate
 
 ## Limits
 
-The model can misread legal language, miss a provision, or describe one that is not in the text. Check the bill. The vote checker is a second Claude pass, so disagreement there is a weak signal for vendor-level bias. A comparison provider runs the same analysis on another family, which catches some of those misses. It does not cancel shared bias: two models can be trained on the same public text, refuse the same topics, or repeat the same mistake about a statute. Agreement between them is not proof. The chamber is a sample of synthetic compasses, not a population of configured Avatars. This is a local single-user demo. It is not legal advice.
+The model can misread legal language, miss a provision, or describe one that is not in the text. Check the bill. A pasted link is fetched only from the official hosts under Paste a bill link. Any other address, including a private address that an allowed name resolves to, is refused. The vote checker is a second Claude pass, so disagreement there is a weak signal for vendor-level bias. A comparison provider runs the same analysis on another family, which catches some of those misses. It does not cancel shared bias: two models can be trained on the same public text, refuse the same topics, or repeat the same mistake about a statute. Agreement between them is not proof. The chamber is a sample of synthetic compasses, not a population of configured Avatars. This is a local single-user demo. It is not legal advice.
 
 ### What the bill path defends
 

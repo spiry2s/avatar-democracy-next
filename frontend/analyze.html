@@ -50,21 +50,30 @@
     </div>
 
     <div class="tab-content active" id="tab-upload">
-      <div class="upload-zone" id="upload-zone">
-        <div class="upload-icon">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="17 8 12 3 7 8"/>
-            <line x1="12" y1="3" x2="12" y2="15"/>
-          </svg>
+      <div class="upload-layout">
+        <div class="upload-column">
+          <div class="upload-zone" id="upload-zone">
+            <div class="upload-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <p class="upload-primary">Drop a PDF here, or click to select</p>
+            <p class="upload-secondary">Bills, amendments, omnibus packages — anything legislative</p>
+            <input type="file" id="file-input" accept=".pdf" hidden>
+          </div>
+          <div class="file-info hidden" id="file-info">
+            <span id="file-name"></span>
+            <button class="btn-link" id="file-clear">Remove</button>
+          </div>
         </div>
-        <p class="upload-primary">Drop a PDF here, or click to select</p>
-        <p class="upload-secondary">Bills, amendments, omnibus packages — anything legislative</p>
-        <input type="file" id="file-input" accept=".pdf" hidden>
-      </div>
-      <div class="file-info hidden" id="file-info">
-        <span id="file-name"></span>
-        <button class="btn-link" id="file-clear">Remove</button>
+        <div class="link-panel">
+          <label for="bill-url">Paste a bill link</label>
+          <input type="url" id="bill-url" class="bill-url" name="bill-url" placeholder="https://www.congress.gov/…" autocomplete="off" spellcheck="false" inputmode="url">
+          <p class="link-hint">Supported sources: Sejm, ISAP, Stortinget, Lovdata, and congress.gov. For any other link, download the file and upload it.</p>
+        </div>
       </div>
     </div>
 

@@ -3,7 +3,7 @@ FastAPI server for the Bill Summarizer.
 
 Serves:
 - GET /            - Web UI (frontend/index.html)
-- POST /api/analyze - Analyze a bill (text, URL, or uploaded PDF)
+- POST /api/analyze - Analyze a bill (text, an official bill URL, or an uploaded PDF)
 - GET /api/health  - Health check
 
 Run with:
@@ -52,6 +52,7 @@ from backend import (
     profile as profile_mod,
     questionnaire,
 )
+from backend.bill_fetch import BillSourceError
 
 # Resolve frontend directory relative to project root
 PROJECT_ROOT = Path(__file__).parent
@@ -75,6 +76,8 @@ CONTENT_SECURITY_POLICY = (
     "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
 # HTTP routes that spend a model call. One shared per-IP bucket covers all of them.
+# POST /api/analyze spends a call for pasted text, an uploaded PDF, and the
+# official bill-link field (the URL is fetched, then analyzed like a file).
 # Backend callers behind those routes:
 #   comparison.analyze_for_api -> summarizer (llm.get_provider / llm.resolve)
 #   avatar.cast_vote -> llm.resolve for the primary vote, the checker pass, and drift
@@ -723,12 +726,15 @@ async def analyze(
     file: Optional[UploadFile] = File(None),
 ) -> JSONResponse:
     """
-    Analyze a bill from text, URL, or uploaded PDF.
+    Analyze a bill from text, an official bill link, or an uploaded PDF.
 
     Provide exactly one of:
     - text: Pasted bill text
-    - url: URL to a bill (PDF or HTML)
+    - url: https URL on the official-source allowlist (HTML, PDF, or plain text)
     - file: Uploaded PDF
+
+    The url field is fetched by backend.bill_fetch and then analyzed through
+    the same pipeline as an uploaded file. Any other host is a 400.
 
     Returns the structured analysis as JSON.
     """
@@ -758,13 +764,17 @@ async def analyze(
         else:
             # Should never reach here due to checks above
             raise HTTPException(status_code=400, detail="No source provided")
+    except BillSourceError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=400,
             detail=f"Could not extract bill text: {str(e)}",
         ) from e
 
-    if not bill_text or len(bill_text.strip()) < 100:
+    if not bill_text or len(bill_text.strip()) < extractors.MIN_BILL_CHARS:
         raise HTTPException(
             status_code=400,
             detail=f"Extracted text is too short ({len(bill_text)} chars). "

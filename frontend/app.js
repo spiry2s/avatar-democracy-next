@@ -5,6 +5,7 @@ const fileInput = document.getElementById('file-input');
 const fileInfo = document.getElementById('file-info');
 const fileName = document.getElementById('file-name');
 const fileClear = document.getElementById('file-clear');
+const billUrl = document.getElementById('bill-url');
 const textInput = document.getElementById('text-input');
 const titleInput = document.getElementById('title-input');
 const analyzeBtn = document.getElementById('analyze-btn');
@@ -80,10 +81,11 @@ function setFile(file) {
 // ── Enable/disable analyze button ────────────────────────────────────────────
 
 textInput.addEventListener('input', updateAnalyzeBtn);
+billUrl.addEventListener('input', updateAnalyzeBtn);
 
 function updateAnalyzeBtn() {
   const hasContent = activeTab === 'upload'
-    ? selectedFile !== null
+    ? selectedFile !== null || billUrl.value.trim().length > 0
     : textInput.value.trim().length >= 100;
   analyzeBtn.disabled = !hasContent;
 }
@@ -95,10 +97,23 @@ analyzeBtn.addEventListener('click', async () => {
   resultsEl.classList.add('hidden');
 
   const formData = new FormData();
+  let loadingMode = 'analyze';
 
   if (activeTab === 'upload') {
-    if (!selectedFile) { showError('Please select a PDF file.'); return; }
-    formData.append('file', selectedFile);
+    const url = billUrl.value.trim();
+    if (selectedFile && url) {
+      showError('Use either a PDF or a link, not both.');
+      return;
+    }
+    if (url) {
+      formData.append('url', url);
+      loadingMode = 'url';
+    } else if (selectedFile) {
+      formData.append('file', selectedFile);
+    } else {
+      showError('Select a PDF or paste a bill link.');
+      return;
+    }
   } else {
     const text = textInput.value.trim();
     if (!text) { showError('Please paste some bill text.'); return; }
@@ -106,7 +121,7 @@ analyzeBtn.addEventListener('click', async () => {
     formData.append('text', text);
   }
 
-  setLoading(true);
+  setLoading(true, loadingMode);
 
   try {
     const res = await apiFetch('/api/analyze', { method: 'POST', body: formData });
@@ -124,12 +139,19 @@ analyzeBtn.addEventListener('click', async () => {
   }
 });
 
-function setLoading(on) {
-  analyzeBtn.disabled = on;
+function setLoading(on, mode) {
   statusEl.classList.toggle('hidden', !on);
   if (on) {
-    statusPrimary.textContent = 'Analyzing…';
-    statusSecondary.textContent = 'This may take 30–60 seconds for long bills.';
+    analyzeBtn.disabled = true;
+    if (mode === 'url') {
+      statusPrimary.textContent = 'Fetching the bill…';
+      statusSecondary.textContent = 'Reading the official source, then analyzing. This may take 30–60 seconds.';
+    } else {
+      statusPrimary.textContent = 'Analyzing…';
+      statusSecondary.textContent = 'This may take 30–60 seconds for long bills.';
+    }
+  } else {
+    updateAnalyzeBtn();
   }
 }
 

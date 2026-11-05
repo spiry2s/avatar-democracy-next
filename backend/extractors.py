@@ -1,11 +1,36 @@
 """
-Text extraction from bill sources: raw text, URLs, and uploaded PDFs.
+Text extraction from bill sources: raw text, official URLs, and uploaded PDFs.
+
+URL fetches go through ``backend.bill_fetch``. Only the hosts in
+``OFFICIAL_BILL_HOSTS`` are retrieved, and the TCP connection is pinned to
+a public address that this process resolved itself.
 """
 
 from __future__ import annotations
 
 import io
 import re
+
+from backend.bill_fetch import MSG_TYPE, MSG_UNSUPPORTED, BillSourceError, fetch_official_document
+
+# The analyzer refuses anything shorter than this. A PDF under the floor is
+# treated as a scan (no text layer) rather than as a short bill.
+MIN_BILL_CHARS = 100
+PDF_MAX_PAGES = 300
+PDF_MAX_CHARS = 1_500_000
+
+MSG_NO_TEXT_LAYER = (
+    "This PDF has no text layer. It looks like a scan. "
+    "Upload a text file instead."
+)
+MSG_PDF_UNREADABLE = (
+    "Could not read that PDF. If it is a scan, upload a text file instead."
+)
+
+_DROP_BLOCKS = re.compile(
+    r"(?is)<(script|style|nav|noscript|template|header|footer)\b[^>]*>.*?</\1>"
+)
+_TAGS = re.compile(r"(?is)<[^>]+>")
 
 
 def extract_text(source: str | bytes, source_type: str) -> str:
@@ -26,6 +51,8 @@ def extract_text(source: str | bytes, source_type: str) -> str:
         return source if isinstance(source, str) else source.decode("utf-8", errors="replace")
 
     if source_type == "url":
+        if not isinstance(source, str):
+            raise BillSourceError(MSG_UNSUPPORTED, 400)
         return _extract_from_url(source)
 
     if source_type == "pdf":
@@ -36,58 +63,79 @@ def extract_text(source: str | bytes, source_type: str) -> str:
 
 
 def _extract_from_url(url: str) -> str:
-    """Fetch a URL and extract text. Handles HTML and PDF responses."""
-    try:
-        import httpx
-    except ImportError as e:
-        raise ImportError("httpx is required for URL extraction: pip install httpx") from e
-
-    with httpx.Client(follow_redirects=True, timeout=30) as client:
-        response = client.get(url, headers={"User-Agent": "BillAnalyzer/0.1"})
-        response.raise_for_status()
-
-    content_type = response.headers.get("content-type", "").lower()
-
-    if "pdf" in content_type:
-        return _extract_from_pdf(response.content)
-
-    return _extract_from_html(response.text)
+    """Fetch an official URL and return readable text. HTML is not returned raw."""
+    document = fetch_official_document(url)
+    if document.kind == "pdf":
+        return _extract_from_pdf(document.body)
+    if document.kind == "html":
+        return _extract_from_html(document.body.decode("utf-8-sig", errors="replace"))
+    if document.kind == "text":
+        return document.body.decode("utf-8-sig", errors="replace")
+    raise BillSourceError(MSG_TYPE, 400)
 
 
 def _extract_from_html(html: str) -> str:
-    """Strip HTML tags and return readable text."""
+    """Strip scripts, styles, and navigation and return readable text."""
     try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "nav", "header", "footer"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n")
+        text = _html_with_beautifulsoup(html)
     except ImportError:
-        # Fallback: crude tag stripping
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = re.sub(r"&[a-z]+;", " ", text)
-
-    # Collapse whitespace
+        text = _html_fallback(html)
+    except Exception:
+        text = _html_fallback(html)
     lines = [line.strip() for line in text.splitlines()]
-    lines = [line for line in lines if line]
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line)
+
+
+def _html_with_beautifulsoup(html: str) -> str:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "header", "footer", "noscript", "template"]):
+        tag.decompose()
+    return soup.get_text(separator="\n")
+
+
+def _html_fallback(html: str) -> str:
+    text = _DROP_BLOCKS.sub(" ", html)
+    text = _TAGS.sub(" ", text)
+    text = re.sub(r"&[a-z]+;", " ", text)
+    return text
 
 
 def _extract_from_pdf(content: bytes) -> str:
-    """Extract text from PDF bytes."""
+    """Extract text from PDF bytes, capped by page and character count.
+
+    An empty or very short result is the scanned-PDF case: the file has no
+    usable text layer, so the caller is asked for a text upload.
+    """
     try:
         import pypdf
     except ImportError as e:
         raise ImportError("pypdf is required for PDF extraction: pip install pypdf") from e
 
-    reader = pypdf.PdfReader(io.BytesIO(content))
-    pages = []
-    for page in reader.pages:
-        text = page.extract_text()
-        if text:
-            pages.append(text.strip())
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(content))
+        page_count = len(reader.pages)
+        pieces: list[str] = []
+        total = 0
+        for index in range(min(page_count, PDF_MAX_PAGES)):
+            if total >= PDF_MAX_CHARS:
+                break
+            extracted = reader.pages[index].extract_text() or ""
+            piece = extracted.strip()
+            if not piece:
+                continue
+            room = PDF_MAX_CHARS - total
+            if len(piece) > room:
+                piece = piece[:room]
+            pieces.append(piece)
+            total += len(piece)
+    except BillSourceError:
+        raise
+    except Exception as exc:
+        raise BillSourceError(MSG_PDF_UNREADABLE, 400) from exc
 
-    if not pages:
-        raise ValueError("Could not extract any text from the PDF. It may be a scanned image.")
-
-    return "\n\n".join(pages)
+    text = "\n\n".join(pieces).strip()
+    if len(text) < MIN_BILL_CHARS:
+        raise BillSourceError(MSG_NO_TEXT_LAYER, 400)
+    return text

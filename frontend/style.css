@@ -258,6 +258,59 @@ h3 { font-size: var(--text-lg); font-weight: 600; line-height: var(--leading-tig
 .upload-primary { font-weight: 600; margin-bottom: var(--space-2); }
 .upload-secondary { font-size: var(--text-sm); color: var(--text-muted); }
 
+.upload-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.upload-column { min-width: 0; }
+
+.link-panel {
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-5);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  justify-content: center;
+  min-width: 0;
+}
+
+.link-panel label {
+  font-weight: 600;
+}
+
+.bill-url {
+  width: 100%;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 16px;
+  padding: 10px 12px;
+}
+
+.bill-url:focus-visible { border-color: var(--accent); }
+
+.link-hint {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+@media (min-width: 800px) {
+  .upload-layout {
+    flex-direction: row;
+    align-items: stretch;
+  }
+
+  .upload-layout .upload-column,
+  .upload-layout .link-panel {
+    flex: 1 1 0;
+  }
+}
+
 .file-info {
   display: flex;
   align-items: center;
