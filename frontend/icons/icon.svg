@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img">
+  <title>Avatar Democracy</title>
+  <!-- Same three-bar mark as docs/site/favicon.svg, in the app palette. -->
+  <rect width="32" height="32" fill="#1a1d27"/>
+  <rect x="7" y="8" width="18" height="2" fill="#e8eaf0"/>
+  <rect x="7" y="15" width="18" height="2" fill="#e8eaf0"/>
+  <rect x="7" y="22" width="11" height="2" fill="#5b7fff"/>
+</svg>

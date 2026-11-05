@@ -134,6 +134,28 @@ async def chamber_page() -> FileResponse:
     return _serve("chamber.html")
 
 
+@app.get("/manifest.webmanifest")
+async def web_manifest() -> FileResponse:
+    """Web app manifest so a phone can add the UI to its home screen."""
+    path = FRONTEND_DIR / "manifest.webmanifest"
+    if not path.exists():
+        raise HTTPException(status_code=500, detail="Frontend file missing: manifest.webmanifest")
+    return FileResponse(path, media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+async def service_worker() -> FileResponse:
+    """Static-shell service worker. It does not cache /api."""
+    path = FRONTEND_DIR / "sw.js"
+    if not path.exists():
+        raise HTTPException(status_code=500, detail="Frontend file missing: sw.js")
+    return FileResponse(
+        path,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/api/health")
 async def health() -> dict:
     """Health check. Reports whether the configured LLM provider has a credential.
@@ -678,12 +700,30 @@ def ensure_port_available(host: str, port: int) -> None:
         sock.close()
 
 
+def resolve_bind_host(argv: list[str] | None = None) -> str:
+    """Address ``python main.py`` binds.
+
+    ``--host`` wins when it is passed. Otherwise the HOST environment variable
+    is used. When neither is set, the default stays ``127.0.0.1`` (localhost).
+    ``0.0.0.0`` is opt-in and exposes the app to the local network.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--host", default=None)
+    args, _unknown = parser.parse_known_args([] if argv is None else argv)
+    if args.host:
+        return args.host
+    return os.environ.get("HOST", "127.0.0.1")
+
+
 def main() -> None:
     """Entry point for `python main.py`."""
+    import sys
     import uvicorn
 
     port = int(os.environ.get("PORT", "8000"))
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = resolve_bind_host(sys.argv[1:])
     ensure_port_available(host, port)
 
     print(f"Starting Bill Summarizer on http://{host}:{port}")

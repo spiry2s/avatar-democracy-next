@@ -81,6 +81,24 @@ EMERGENCY_COOLING_OFF_SECONDS=0
 
 The process writes runtime state under `data/` (gitignored): `profile.json`, one JSON file per bill, `audit.jsonl`, and `population.json`.
 
+## Use on your phone
+
+The pages fit a phone, and the app can be added to the home screen.
+
+On iPhone, open the app in Safari, tap Share, then Add to Home Screen. On Android, open it in Chrome, open the browser menu, then Add to Home screen or Install app. The icon then opens the app on its own, without the browser toolbar.
+
+The default stays bound to localhost (`127.0.0.1`). A phone cannot open that address. To reach this computer from a phone on the same Wi-Fi, opt in:
+
+```bash
+python main.py --host 0.0.0.0
+```
+
+`HOST=0.0.0.0` does the same thing. If both are set, `--host` wins. Then open `http://<this-computer-lan-ip>:8000` on the phone (`PORT` is still `8000` unless you change it).
+
+This exposes the app, and any configured API key, to anyone on that network. Analysis and votes spend that key. Use it only on a trusted network, never on public or shared Wi-Fi. It is still the local process on your machine.
+
+A service worker caches only the static shell (pages, CSS, scripts, and icons) and only when the page is served over https or from localhost. It does not cache `/api` or any analysis or vote response, and it asks the network for HTML first so a new release shows up. Over plain `http://` on a LAN address the pages and the home-screen icon still work; the worker simply does not install.
+
 ## Run the tests
 
 From the repository root. No API key and no network:
@@ -132,7 +150,7 @@ Optional. Defaults live in `backend/config.py` and `backend/profile.py`. Copy `.
 | `ENDORSEMENT_REVOCATION_SECONDS` | `86400` | Window during which an endorsement can be revoked |
 | `SECTION_PASSAGE_RATIO` | `0.5` | `yes / (yes + no)` required for a contested section |
 | `CHAMBER_VOTE_TAU` | `0.12` | Compass alignment below this abstains |
-| `HOST` | `127.0.0.1` | Bind address |
+| `HOST` | `127.0.0.1` | Bind address. `python main.py --host` overrides it. Default stays localhost |
 | `PORT` | `8000` | Bind port |
 
 `MULTI_MODEL_CHECK`, `DELEGATE_DRIFT_CHECK`, and `CROSS_BILL_CONFLICT_CHECK` turn off when set to `0`, `false`, or an empty string. `COMPARISON_VOTE_POLICY` accepts `abstain` or `review`. Anything else is treated as `abstain`.
@@ -247,7 +265,15 @@ avatar-democracy/
 │   ├── vote.js
 │   ├── bills.js
 │   ├── chamber.js
-│   └── history.js
+│   ├── history.js
+│   ├── pwa.js                 # Registers the static-shell service worker
+│   ├── sw.js                  # Caches the shell only; never /api
+│   ├── manifest.webmanifest
+│   └── icons/                 # Home-screen mark, from the same bars as docs/site/favicon.svg
+│       ├── icon.svg
+│       ├── icon-192.png
+│       ├── icon-512.png
+│       └── icon-maskable-512.png
 ├── tests/
 │   ├── test_bills.py
 │   ├── test_chamber.py
@@ -256,7 +282,8 @@ avatar-democracy/
 │   ├── test_grounding.py
 │   ├── test_injection.py        # Fences, schema, quote checks, truncation, no network
 │   ├── test_llm.py              # Fake-provider coverage of every model call site
-│   └── test_comparison.py       # OpenAI-compatible HTTP shape, disagreement, vote policy
+│   ├── test_comparison.py       # OpenAI-compatible HTTP shape, disagreement, vote policy
+│   └── test_mobile.py           # Manifest, icons, viewport, service worker, bind host
 ├── ai_avatar_democracy_v1.1.md  # Current white paper
 ├── CHANGES-v1.1.md              # Changes since v1.0
 ├── ai_avatar_democracy_v1.0.md  # Kept for history
