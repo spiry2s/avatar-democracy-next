@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from backend import llm
+from backend import config, llm
 from backend.grounding import (
     BILL_DATA_BEGIN,
     BILL_DATA_END,
@@ -49,6 +49,7 @@ class BillAnalysis:
     title_grounded: bool | None = None
     title_quote: str | None = None
     title_grounding_reason: str | None = None
+    token_usage: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +70,7 @@ class BillAnalysis:
             "metadata": self.metadata,
             "truncation": self.truncation or {},
             "grounding": self.grounding or {},
+            "token_usage": self.token_usage or [],
         }
 
 
@@ -209,6 +211,7 @@ def _invoke(
     chunk_index: int,
     chunk_count: int,
     repair: str | None,
+    max_tokens: int,
 ) -> Any:
     data_channel = provider.accepts_data_blocks()
     user = _user_prompt(
@@ -221,7 +224,7 @@ def _invoke(
     kwargs: dict[str, Any] = {
         "user": user,
         "system": SYSTEM_PROMPT,
-        "max_tokens": 8000,
+        "max_tokens": max_tokens,
         "error_prefix": "Could not parse response as JSON",
     }
     if data_channel:
@@ -236,8 +239,13 @@ def _request_valid(
     *,
     chunk_index: int,
     chunk_count: int,
+    max_tokens: int,
 ) -> dict[str, Any]:
-    """Parse and validate. Retry once. A failed retry keeps the schema error."""
+    """Parse and validate. Retry once. A failed retry keeps the schema error.
+
+    A cut-off reply is not a schema error and is not retried. Parsing it would
+    treat a truncated JSON object as the analysis.
+    """
     last_error: ValueError | None = None
     for _attempt in range(_SCHEMA_ATTEMPTS):
         repair = None
@@ -254,7 +262,10 @@ def _request_valid(
                 chunk_index=chunk_index,
                 chunk_count=chunk_count,
                 repair=repair,
+                max_tokens=max_tokens,
             )
+        except llm.LLMTruncatedError:
+            raise
         except ValueError as exc:
             last_error = exc
             continue
@@ -310,6 +321,8 @@ def _merge(payloads: list[dict[str, Any]]) -> dict[str, Any]:
 def analyze_bill(
     bill_text: str,
     provider: llm.LLMProvider | None = None,
+    max_tokens: int | None = None,
+    usage_role: str = "primary",
 ) -> BillAnalysis:
     """
     Analyze a bill and return structured output.
@@ -317,10 +330,15 @@ def analyze_bill(
     Args:
         bill_text: the bill text to analyze.
         provider: optional primary-role provider. Defaults to the configured one.
+        max_tokens: output budget. None uses LLM_MAX_TOKENS. The comparison
+            path passes COMPARISON_MAX_TOKENS.
+        usage_role: label stored with this provider's token counts.
 
     Raises:
         ValueError: If bill text is empty, or the response is not JSON matching
             the schema after one retry.
+        llm.LLMTruncatedError: the model stopped for length or returned no text.
+            The partial reply is not parsed.
         llm.LLMConfigError: If the provider is not configured. This is a
             RuntimeError, so callers that catch RuntimeError still see it.
         Exception: Provider/API failures propagate (for Anthropic, anthropic.APIError).
@@ -329,11 +347,20 @@ def analyze_bill(
         raise ValueError("Bill text is empty")
 
     provider = llm.resolve(provider, "primary")
+    budget = config.LLM_MAX_TOKENS if max_tokens is None else max_tokens
     chunks, truncation = plan_passes(bill_text, MAX_SINGLE_PASS_CHARS)
     payloads = [
-        _request_valid(provider, chunk, chunk_index=index, chunk_count=len(chunks))
+        _request_valid(
+            provider,
+            chunk,
+            chunk_index=index,
+            chunk_count=len(chunks),
+            max_tokens=budget,
+        )
         for index, chunk in enumerate(chunks)
     ]
+    # On failure the counts stay on the provider so the caller can report them.
+    usage = llm.consume_usage(provider, role=usage_role)
     merged = apply_grounding(
         _merge(payloads),
         bill_text,
@@ -359,4 +386,5 @@ def analyze_bill(
         title_grounded=merged.get("title_grounded"),
         title_quote=merged.get("title_quote") or "",
         title_grounding_reason=merged.get("title_grounding_reason") or "",
+        token_usage=usage,
     )

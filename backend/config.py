@@ -29,6 +29,12 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    """An int env value. Non-integers and non-positive values keep `default`."""
+    value = _int_env(name, default)
+    return value if value > 0 else default
+
+
 def _provider_id(raw: str | None, default: str) -> str:
     """Normalize a provider id. A blank value keeps `default`."""
     name = (raw or "").strip().lower()
@@ -50,7 +56,15 @@ MODEL = os.environ.get("AVATAR_MODEL", "claude-sonnet-4-6")
 OPENAI_BASE_URL = (os.environ.get("OPENAI_BASE_URL") or "").strip() or "https://api.openai.com/v1"
 OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "").strip()
 OPENAI_CHECKER_MODEL = (os.environ.get("OPENAI_CHECKER_MODEL") or "").strip()
-OPENAI_TIMEOUT = _float_env("OPENAI_TIMEOUT", 120.0)
+# A DeepSeek reasoning call on one bill ran 78–94s and can pass 2 minutes.
+# 120s was cutting those off. 600s covers a slow reasoning pass.
+OPENAI_TIMEOUT = _float_env("OPENAI_TIMEOUT", 600.0)
+
+# Output budget for one model call. Reasoning models spend this on reasoning
+# tokens before they emit JSON, so 8000 is not enough for them. Comparison
+# has its own knob and does not fall back to a smaller hidden default.
+LLM_MAX_TOKENS = _positive_int_env("LLM_MAX_TOKENS", 32000)
+COMPARISON_MAX_TOKENS = _positive_int_env("COMPARISON_MAX_TOKENS", 32000)
 
 # Endorsement thresholds by bill scope (white paper decision 8).
 # Real numbers for a US-sized population: ~50,000 ordinary, ~500,000 major,

@@ -65,6 +65,22 @@ def test_aggregate_counts_operator_plus_population():
     assert s1["by_archetype"]["conservative"]["no"] == 1
 
 
+def test_needs_human_review_is_not_an_automatic_yes_or_no():
+    analysis = {"sections": [
+        {"section_id": "s1", "heading": "H1"},
+        {"section_id": "s2", "heading": "H2"},
+    ]}
+    operator_vote = {"section_votes": [
+        {"section_id": "s1", "position": "yes", "needs_human_review": True},
+        {"section_id": "s2", "position": "no", "needs_human_review": False},
+    ]}
+    tallies = chamber.aggregate(analysis, operator_vote, [], {}, tau=0.12)
+    s1 = next(t for t in tallies if t["section_id"] == "s1")
+    s2 = next(t for t in tallies if t["section_id"] == "s2")
+    assert (s1["yes"], s1["no"], s1["abstain"], s1["needs_human_review"]) == (0, 0, 0, 1)
+    assert (s2["yes"], s2["no"], s2["abstain"], s2["needs_human_review"]) == (0, 1, 0, 0)
+
+
 def test_aggregate_without_operator():
     analysis = {"sections": [{"section_id": "s1", "heading": "H1"}]}
     pop = [{"compass": {"economic": 0.8}}, {"compass": {"economic": -0.8}}]

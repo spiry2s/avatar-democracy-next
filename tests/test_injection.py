@@ -196,10 +196,23 @@ def test_anthropic_sends_a_document_block_separate_from_instructions(monkeypatch
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     calls: dict[str, Any] = {}
 
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def get_final_message(self):
+            return SimpleNamespace(content=[SimpleNamespace(text="{}")], stop_reason="end_turn", usage=None)
+
     class FakeMessages:
         def create(self, **kwargs):
+            raise AssertionError("non-streaming messages.create was called")
+
+        def stream(self, **kwargs):
             calls["kwargs"] = kwargs
-            return SimpleNamespace(content=[SimpleNamespace(text="{}")])
+            return FakeStream()
 
     class FakeClient:
         def __init__(self, api_key):

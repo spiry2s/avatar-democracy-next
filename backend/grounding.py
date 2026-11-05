@@ -32,6 +32,10 @@ ANALYSIS_DATA_END = "<<<END_ANALYSIS_DATA>>>"
 # is still reported as missing.
 MIN_QUOTE_CHARS = 40
 MIN_QUOTE_ALNUM = 20
+# Title quotes only. A short official name such as a Norwegian statute title
+# is under the section floor. Section quotes keep MIN_QUOTE_CHARS.
+MIN_TITLE_CHARS = 20
+MIN_TITLE_ALNUM = 12
 
 # Blank characters that sit in letter or symbol categories and would otherwise
 # count. Variation selectors are checked by code point as well as category.
@@ -102,8 +106,62 @@ _BENEFICIARY_GROUPS = ("benefits", "costs", "regulated")
 _METADATA_ENUMS = {"complexity", "your_confidence"}
 
 # A heading at the start of a line. "SECRETARY" does not match: a digit is required.
+# US headings stay case-insensitive and at column 0, which is how govinfo prints
+# them. Norwegian § / §§ and Polish Art. / ust. / pkt. may be indented. Art. is
+# case-sensitive so a wrapped cross-reference ("art. 11 ustawy") is not a heading.
+# A singular § line is a heading when it has a period ("§ 6."), a capitalized
+# title ("§ 1 Formål"), or the marker alone ends the line. A bare "§ N" with
+# no period and no title is not a heading when the previous line does not end
+# a sentence and the next line continues in lowercase. "§§" is a cross-reference
+# in Norwegian text: "§§ 3" alone on a line does not open a section. "§§ 4 til 6."
+# still does, because the line is the heading, not a wrapped number.
+# Bare "1." and "1)" lines are not in this pattern. They are ust./pkt. only inside
+# an Art. span, so a Norwegian numbered list does not open a section.
+_US_HEADING = (
+    r"(?i:sec(?:tion)?\.?\s+\d+[a-z0-9-]*|title\s+(?:[ivxlc]+|\d+))\b[^\n]*"
+)
+# Optional "N" or "N til M" / "N og M" after the section sign.
+_PARA_RANGE = r"[ \t]*\d+[a-zA-Z]?(?:[ \t]*(?:til|og|–|-)[ \t]*\d+[a-zA-Z]?)*"
+# Plural §§ opens a section only with a period or a capitalized title on that
+# line. A line that is only "§§ 3" is a wrapped cross-reference.
+_PLURAL_HEADING = rf"§§(?:{_PARA_RANGE})?[ \t]*(?:\.[^\n]*|(?=[A-ZÆØÅ])[^\n]*)"
+# Singular § also allows the marker to end the line. A bare "§ N" is removed
+# later when the surrounding lines show it is a continuation.
+_SINGULAR_HEADING = rf"§{_PARA_RANGE}[ \t]*(?:\.[^\n]*|(?=[A-ZÆØÅ])[^\n]*|(?=\n|$))"
+_PARA_HEADING = rf"(?P<paragraph_line>(?:{_PLURAL_HEADING}|{_SINGULAR_HEADING}))"
+_BARE_SINGULAR_SECTION = re.compile(r"^§[ \t]*\d+[a-zA-Z]?[ \t]*$")
+_SENTENCE_END = re.compile(r"[.?!][\"'»”)\]]*$")
 _HEADING = re.compile(
-    r"(?im)^(?:sec(?:tion)?\.?\s+\d+[a-z0-9-]*|title\s+(?:[ivxlc]+|\d+))\b[^\n]*"
+    rf"(?m)^(?:(?P<us>{_US_HEADING})"
+    rf"|[ \t]*(?:{_PARA_HEADING}"
+    rf"|(?P<art>Art\.\s*\d+[a-zA-Z]?\b[^\n]*)"
+    rf"|(?P<ust>ust\.\s*\d+[a-zA-Z]?\b[^\n]*)"
+    rf"|(?P<pkt>pkt\.?\s*\d+[a-zA-Z]?\b[^\n]*)))"
+)
+_BARE_HEADING = re.compile(
+    r"(?m)^[ \t]*(?:(?P<bare_ust>\d+[a-zA-Z]?\.(?:[ \t][^\n]*)?)"
+    r"|(?P<bare_pkt>\d+[a-zA-Z]?\)[^\n]*))"
+)
+# Top-level headings are peers. ust. and pkt. nest inside them, so an article
+# span runs through its ustępy and a quote cited to the article can sit in one.
+_HEADING_LEVEL = {
+    "title": 20,
+    "sec": 20,
+    "paragraph": 20,
+    "paragraphs": 20,
+    "art": 20,
+    "ust": 30,
+    "pkt": 40,
+}
+_MARKER = re.compile(
+    r"(?P<paragraphs>§§)"
+    r"|(?P<paragraph>§)"
+    r"|(?P<art>\bArt\.)"
+    r"|(?P<ust>\bust\.)"
+    r"|(?P<pkt>\bpkt\.?)"
+    r"|(?P<sec>\bsec(?:tion)?\.?)"
+    r"|(?P<title>\btitle\b)",
+    re.IGNORECASE,
 )
 
 _ALL_TARGETS = {
@@ -380,32 +438,237 @@ def locate_quote(
     }
 
 
-def section_label_key(value: str) -> tuple[str, str] | None:
-    """`(kind, number)` for a heading or a cited id. None when neither is present."""
-    text = re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
-    match = re.search(r"\b(sec(?:tion)?|title)\s+(\d+[a-z]?|[ivxlc]+)\b", text)
+def _number_at(text: str, pos: int, *, roman: bool) -> str | None:
+    if roman:
+        match = re.match(r"\s*(\d+[a-z]?|[ivxlc]+)\b", text[pos:], re.IGNORECASE)
+    else:
+        match = re.match(r"\s*(\d+[a-z]?)\b", text[pos:], re.IGNORECASE)
     if not match:
         return None
-    kind = "title" if match.group(1) == "title" else "sec"
-    return (kind, match.group(2))
+    return match.group(1).lower()
+
+
+def section_label_key(value: str) -> tuple[tuple[str, str], ...] | None:
+    """Path of `(kind, number)` pairs for a heading or a cited id.
+
+    `Sec. 2(a)` is `(('sec', '2'),)`. `Art. 1 ust. 2` keeps both levels.
+    `§ 1a` is a paragraph. `§§` is a different kind, so it does not satisfy
+    a citation of `§ 1`. None when no marker is present.
+    """
+    text = str(value)
+    path: list[tuple[str, str]] = []
+    for match in _MARKER.finditer(text):
+        kind_name = match.lastgroup or ""
+        if kind_name == "paragraphs":
+            kind = "paragraphs"
+        elif kind_name == "paragraph":
+            kind = "paragraph"
+        elif kind_name == "art":
+            kind = "art"
+        elif kind_name == "ust":
+            kind = "ust"
+        elif kind_name == "pkt":
+            kind = "pkt"
+        elif kind_name == "sec":
+            kind = "sec"
+        else:
+            kind = "title"
+        number = _number_at(text, match.end(), roman=(kind == "title"))
+        if kind == "paragraphs" and number is None:
+            path.append((kind, ""))
+            continue
+        if number is None:
+            continue
+        path.append((kind, number))
+    if not path:
+        return None
+    return tuple(path)
+
+
+def _heading_kind(match: re.Match[str]) -> str:
+    for name in ("us", "paragraph_line", "paragraphs", "paragraph", "art", "ust", "pkt", "bare_ust", "bare_pkt"):
+        if match.groupdict().get(name):
+            return name
+    return ""
+
+
+def _leading_key(heading: str) -> tuple[tuple[str, str], ...] | None:
+    """The marker at the start of a heading line, ignoring later cross-references.
+
+    `Art. 2. ... o których mowa w art. 11 ustawy` is Art. 2, not Art. 11.
+    A citation such as `Art. 1 ust. 2` still uses `section_label_key`, which
+    reads every marker, because that string is the path and not a sentence.
+    """
+    text = heading.strip()
+    match = _MARKER.search(text)
+    if match is None or text[: match.start()].strip():
+        return None
+    kind_name = match.lastgroup or ""
+    if kind_name == "paragraphs":
+        kind = "paragraphs"
+    elif kind_name == "paragraph":
+        kind = "paragraph"
+    elif kind_name == "art":
+        kind = "art"
+    elif kind_name == "ust":
+        kind = "ust"
+    elif kind_name == "pkt":
+        kind = "pkt"
+    elif kind_name == "sec":
+        kind = "sec"
+    else:
+        kind = "title"
+    number = _number_at(text, match.end(), roman=(kind == "title"))
+    if kind == "paragraphs" and number is None:
+        return ((kind, ""),)
+    if number is None:
+        return None
+    return ((kind, number),)
+
+
+def _own_key(kind: str, heading: str) -> tuple[tuple[str, str], ...] | None:
+    if kind == "bare_ust":
+        match = re.match(r"\s*(\d+[a-zA-Z]?)\.", heading)
+        if not match:
+            return None
+        return (("ust", match.group(1).lower()),)
+    if kind == "bare_pkt":
+        match = re.match(r"\s*(\d+[a-zA-Z]?)\)", heading)
+        if not match:
+            return None
+        return (("pkt", match.group(1).lower()),)
+    return _leading_key(heading)
+
+
+def _explicit_heading(match: re.Match[str]) -> dict[str, Any] | None:
+    kind = _heading_kind(match)
+    own = _own_key(kind, match.group(0))
+    if not own:
+        return None
+    level_kind = own[-1][0]
+    return {
+        "start": match.start(),
+        "heading": match.group(0).strip(),
+        "kind": kind,
+        "own": own,
+        "level": _HEADING_LEVEL[level_kind],
+    }
+
+
+def _last_nonempty_line(text: str) -> str | None:
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            return line.strip()
+    return None
+
+
+def _first_nonempty_line(text: str) -> str | None:
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return None
+
+
+def _is_wrapped_section_reference(source: str, match: re.Match[str]) -> bool:
+    """A bare ``§ N`` continued from the previous line and into lowercase text.
+
+    ``§ 6.`` and ``§ 1 Formål`` stay headings. ``§§ 3`` is not matched as a
+    heading at all. This catches a singular marker with no period and no title
+    when the sentence did not end above it and the next line carries on in
+    lowercase.
+    """
+    if not _BARE_SINGULAR_SECTION.fullmatch(match.group(0).strip()):
+        return False
+    previous = _last_nonempty_line(source[: match.start()])
+    if previous is None or _SENTENCE_END.search(previous):
+        return False
+    following = _first_nonempty_line(source[match.end() :])
+    return following is not None and following[:1].islower()
+
+
+def _heading_matches(source: str) -> list[re.Match[str]]:
+    return [
+        match
+        for match in _HEADING.finditer(source)
+        if not _is_wrapped_section_reference(source, match)
+    ]
 
 
 def bill_section_spans(source: str) -> list[dict[str, Any]]:
-    """One span per heading, from that heading through the character before the next."""
-    matches = list(_HEADING.finditer(source))
-    spans = []
-    for index, match in enumerate(matches):
-        start = match.start()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+    """One span per heading.
+
+    A top-level heading runs until the next top-level heading, so it contains
+    the ust. and pkt. under it. A ust. runs until the next ust. or a higher
+    heading. Bare `1.` / `1)` lines count only inside an `Art.` span.
+    """
+    explicit: list[dict[str, Any]] = []
+    for match in _heading_matches(source):
+        item = _explicit_heading(match)
+        if item is not None:
+            explicit.append(item)
+
+    art_ranges: list[tuple[int, int]] = []
+    for index, item in enumerate(explicit):
+        if item["kind"] != "art":
+            continue
+        end = len(source)
+        for nxt in explicit[index + 1 :]:
+            if nxt["level"] <= item["level"]:
+                end = nxt["start"]
+                break
+        art_ranges.append((item["start"], end))
+
+    explicit_starts = {item["start"] for item in explicit}
+    bare: list[dict[str, Any]] = []
+    for match in _BARE_HEADING.finditer(source):
+        if match.start() in explicit_starts:
+            continue
+        if not any(lo <= match.start() < hi for lo, hi in art_ranges):
+            continue
+        item = _explicit_heading(match)
+        if item is not None:
+            bare.append(item)
+
+    raw = sorted(explicit + bare, key=lambda item: item["start"])
+    stack: list[tuple[int, tuple[tuple[str, str], ...]]] = []
+    spans: list[dict[str, Any]] = []
+    for item in raw:
+        level = item["level"]
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        parent: tuple[tuple[str, str], ...] = stack[-1][1] if stack else ()
+        full = parent + item["own"]
+        stack.append((level, full))
         spans.append(
             {
-                "start": start,
-                "end": end,
-                "heading": match.group(0),
-                "key": section_label_key(match.group(0)),
+                "start": item["start"],
+                "end": len(source),
+                "heading": item["heading"],
+                "key": full,
+                "level": level,
             }
         )
+    for index, span in enumerate(spans):
+        for nxt in spans[index + 1 :]:
+            if nxt["level"] <= span["level"]:
+                span["end"] = nxt["start"]
+                break
     return spans
+
+
+def _keys_match(
+    heading_key: tuple[tuple[str, str], ...] | None,
+    cited_key: tuple[tuple[str, str], ...],
+) -> bool:
+    if not heading_key:
+        return False
+    if heading_key == cited_key:
+        return True
+    # "ust. 2" matches the ust. 2 inside whichever article, and two of them
+    # are ambiguous. An empty §§ number must not match §§ 4.
+    if len(cited_key) < len(heading_key) and heading_key[-len(cited_key) :] == cited_key:
+        return all(number for _kind, number in cited_key)
+    return False
 
 
 def resolve_cited_span(
@@ -416,13 +679,15 @@ def resolve_cited_span(
     Blank, "multiple", or any other whole-bill target is ambiguous. An id
     that matches no heading is unmatched. Two headings with the same number
     are ambiguous. All three are refused rather than searched at large.
+    A quote cited to Art. 1 may sit in an ust. of that article. A quote
+    cited to ust. 2 has to sit in that ustęp.
     """
     if flag_targets_all(cited):
         return "section_ambiguous", None
     key = section_label_key(cited)
     if key is None:
         return "section_unmatched", None
-    matches = [span for span in spans if span["key"] == key]
+    matches = [span for span in spans if _keys_match(span.get("key"), key)]
     if len(matches) == 1:
         return "ok", (matches[0]["start"], matches[0]["end"])
     if not matches:
@@ -445,12 +710,130 @@ def _hits(source: str, candidate: str) -> list[tuple[int, int]]:
         cursor = index + 1
 
 
-def fold_for_match(text: str) -> tuple[str, list[int]]:
-    """NFC, then the small match fold. `ends[i]` is the original end of `folded[:i]`.
+def _is_match_space(char: str) -> bool:
+    """Whitespace that collapses for matching. A zero-width space does not."""
+    if char in "\t\n\r\v\f\u2028\u2029":
+        return True
+    return unicodedata.category(char) == "Zs"
 
-    A match on the folded string at `[start, end)` covers `text[ends[start]:ends[end]]`.
-    Ligatures expand to their letters and still map back onto the one original character.
-    NFKC is not used here.
+
+def _is_lower_letter(char: str) -> bool:
+    return bool(char) and char.islower() and unicodedata.category(char).startswith("L")
+
+
+def _is_letter(char: str) -> bool:
+    return bool(char) and unicodedata.category(char).startswith("L")
+
+
+def _collapse_match_units(
+    units: list[tuple[str, int, str]],
+) -> tuple[str, list[int]]:
+    """Collapse whitespace, drop soft hyphens, and join a safe line-break hyphen.
+
+    `units` are `(folded char, original end, original slice)`. The slice is
+    empty for the tail of a ligature expansion. A joined hyphen keeps the
+    original characters inside the mapped span: the letters on either side
+    still point at their own offsets, so the slice from the first letter
+    through the last includes the hyphen and the newline.
+    """
+    out_chars: list[str] = []
+    ends = [0]
+    index = 0
+    count = len(units)
+    while index < count:
+        char, end, orig = units[index]
+        if char == "\u00ad" or orig == "\u00ad":
+            index += 1
+            continue
+        if _line_hyphen_break(units, index, out_chars):
+            index += 1
+            while index < count and _unit_is_space(units[index]):
+                index += 1
+            continue
+        if _unit_is_space((char, end, orig)):
+            nxt = index
+            while nxt < count and _unit_is_space(units[nxt]):
+                nxt += 1
+            out_chars.append(" ")
+            ends.append(units[nxt - 1][1])
+            index = nxt
+            continue
+        out_chars.append(char)
+        ends.append(end)
+        index += 1
+    return "".join(out_chars), ends
+
+
+def _unit_is_space(unit: tuple[str, int, str]) -> bool:
+    char, _end, orig = unit
+    if _is_match_space(char):
+        return True
+    return bool(orig) and all(_is_match_space(piece) for piece in orig)
+
+
+def _unit_has_break(unit: tuple[str, int, str]) -> bool:
+    char, _end, orig = unit
+    return any(piece in "\n\r\u2028\u2029" for piece in (char, orig))
+
+
+def _line_hyphen_break(
+    units: list[tuple[str, int, str]],
+    index: int,
+    out_chars: list[str],
+) -> bool:
+    """Join `word-\\nword` only for a lowercase syllable split.
+
+    The hyphen must be an ASCII hyphen-minus at the end of the line, not an
+    en dash or em dash that the match fold turned into "-". A space before
+    the line break is not a split. The left piece is at least four lowercase
+    letters and is not the tail of a capitalized word. The right piece is two
+    to four lowercase letters. That covers a PDF split such as
+    "regional-\\nnego" and refuses "cat-\\ndog", "state-\\nowned",
+    "pre-\\nexisting", and "Well-\\nknown".
+    """
+    char, _end, orig = units[index]
+    if char != "-" or orig != "-":
+        return False
+    run = 0
+    cursor = len(out_chars) - 1
+    while cursor >= 0 and _is_lower_letter(out_chars[cursor]):
+        run += 1
+        cursor -= 1
+    if run < 4:
+        return False
+    if cursor >= 0 and _is_letter(out_chars[cursor]):
+        return False
+    nxt = index + 1
+    if nxt >= len(units) or not _unit_is_space(units[nxt]):
+        return False
+    # The hyphen has to end the line. A space before the break is "word- word",
+    # which is not a PDF syllable split. Indentation after the break is allowed.
+    saw_break = False
+    while nxt < len(units) and _unit_is_space(units[nxt]):
+        if _unit_has_break(units[nxt]):
+            saw_break = True
+        elif not saw_break:
+            return False
+        nxt += 1
+    if not saw_break or nxt >= len(units):
+        return False
+    right = 0
+    while nxt < len(units) and _is_lower_letter(units[nxt][0]):
+        right += 1
+        nxt += 1
+    return 2 <= right <= 4
+
+
+def fold_for_match(text: str) -> tuple[str, list[int]]:
+    """NFC, the small match fold, then whitespace collapse.
+
+    `ends[i]` is the original end of `folded[:i]`. A match on the folded
+    string at `[start, end)` covers `text[ends[start]:ends[end]]`. Ligatures
+    expand to their letters and still map back onto the one original character.
+    Runs of spaces, tabs, newlines, and other Unicode spaces (category Zs,
+    including NBSP) become one space. Soft hyphens are dropped. A line-break
+    hyphen is joined only by `_line_hyphen_break`. A zero-width space is left
+    in place. NFKC is not used here.
     """
     if not text:
         return "", [0]
@@ -465,8 +848,7 @@ def fold_for_match(text: str) -> tuple[str, list[int]]:
             nfd_chars.append(piece)
             nfd_span.append((start, origin))
 
-    folded: list[str] = []
-    ends = [0]
+    units: list[tuple[str, int, str]] = []
     index = 0
     count = len(nfd_chars)
     while index < count:
@@ -480,28 +862,97 @@ def fold_for_match(text: str) -> tuple[str, list[int]]:
         else:
             span = (nfd_span[index][0], nfd_span[nxt - 1][1])
             pieces = [(char, span) for char in composed]
-        for char, (_start, end) in pieces:
-            for folded_char in _MATCH_FOLD.get(char, char):
-                folded.append(folded_char)
-                ends.append(end)
+        for char, (start, end) in pieces:
+            original = text[start:end]
+            expanded = _MATCH_FOLD.get(char, char)
+            if len(expanded) == 1:
+                units.append((expanded, end, original))
+            else:
+                # The first expanded letter carries the original character.
+                # The rest map to an empty slice so the end offset stays put.
+                for offset, folded_char in enumerate(expanded):
+                    units.append((folded_char, end, original if offset == 0 else ""))
         index = nxt
-    return "".join(folded), ends
+    return _collapse_match_units(units)
+
+
+# A Sejm journal citation and nothing else. "(Dz. U." then an optional
+# "z YYYY r.", then optional poz. and/or nr number lists joined by ",",
+# " i ", or " oraz ", then an optional ", z późn. zm.", then ")".
+# "nie", amounts, art./ust./pkt, and any other word fail the pattern, so they
+# are not skipped. Dz. Urz., M.P., and "(t.j. Dz. U. ...)" are not this form.
+_NUM_LIST = r"\d+(?:\s*(?:,\s*|\s+i\s+|\s+oraz\s+)\d+)*"
+_POZ_LIST = rf"poz\.\s*{_NUM_LIST}"
+_NR_LIST = rf"nr\s+{_NUM_LIST}"
+_CITATION_LISTS = (
+    rf"(?:{_POZ_LIST}(?:\s*(?:,\s*|\s+i\s+|\s+oraz\s+){_NR_LIST})?"
+    rf"|{_NR_LIST}(?:\s*(?:,\s*|\s+i\s+|\s+oraz\s+){_POZ_LIST})?)"
+)
+_JOURNAL_PAREN = re.compile(
+    r"\(\s*[Dd]z\.\s*[Uu]\.\s*"
+    r"(?:z\s+\d{4}\s+r\.\s+)?"
+    rf"(?:{_CITATION_LISTS}\s*)?"
+    r"(?:,\s*z\s+późn\.\s*zm\.\s*)?"
+    r"\)"
+)
+
+
+def _find_folded(folded: str, ends: list[int], needle: str) -> list[tuple[int, int]]:
+    found = []
+    cursor = 0
+    needle_len = len(needle)
+    while True:
+        index = folded.find(needle, cursor)
+        if index < 0:
+            return found
+        found.append((ends[index], ends[index + needle_len]))
+        cursor = index + 1
+
+
+def _omit_folded_span(folded: str, ends: list[int], start: int, end: int) -> tuple[str, list[int]]:
+    """Drop one folded span and collapse the space it leaves. Ends stay original offsets."""
+    kept: list[str] = []
+    kept_ends = [ends[0]]
+    for index, char in enumerate(folded):
+        if start <= index < end:
+            continue
+        kept.append(char)
+        kept_ends.append(ends[index + 1])
+    out: list[str] = []
+    out_ends = [kept_ends[0]]
+    for pos, char in enumerate(kept):
+        if char == " " and out and out[-1] == " ":
+            out_ends[-1] = kept_ends[pos + 1]
+            continue
+        out.append(char)
+        out_ends.append(kept_ends[pos + 1])
+    return "".join(out), out_ends
 
 
 def _folded_hits(source: str, candidate: str, ends: list[int], folded_source: str) -> list[tuple[int, int]]:
-    """Matches of `candidate` in `source`, as offsets into the original source."""
+    """Matches of `candidate` in `source`, as offsets into the original source.
+
+    A quote that does not itself contain a journal citation may cross one
+    citation-only `(Dz. U. ...)` parenthetical. A second citation is not
+    removed in the same attempt, so two gaps cannot be bridged.
+    """
     folded_quote, _quote_ends = fold_for_match(candidate)
     if not folded_quote:
         return []
-    found = []
-    cursor = 0
-    quote_len = len(folded_quote)
-    while True:
-        index = folded_source.find(folded_quote, cursor)
-        if index < 0:
-            return found
-        found.append((ends[index], ends[index + quote_len]))
-        cursor = index + 1
+    found = _find_folded(folded_source, ends, folded_quote)
+    if found or _JOURNAL_PAREN.search(folded_quote):
+        return found
+    hits: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for match in _JOURNAL_PAREN.finditer(folded_source):
+        stripped, stripped_ends = _omit_folded_span(
+            folded_source, ends, match.start(), match.end()
+        )
+        for hit in _find_folded(stripped, stripped_ends, folded_quote):
+            if hit not in seen:
+                seen.add(hit)
+                hits.append(hit)
+    return hits
 
 
 def _intersect(span: tuple[int, int], ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -576,11 +1027,22 @@ def visible_text(value: str) -> str:
     return "".join(kept)
 
 
-def quote_meets_minimum(value: str) -> bool:
-    """True when the quote has enough counted characters and enough letters or digits."""
+def _length_counts(value: str) -> tuple[int, int]:
     text = visible_text(value)
     alnum = sum(1 for char in text if unicodedata.category(char)[0] in "LN")
-    return len(text) >= MIN_QUOTE_CHARS and alnum >= MIN_QUOTE_ALNUM
+    return len(text), alnum
+
+
+def quote_meets_minimum(value: str) -> bool:
+    """True when the quote has enough counted characters and enough letters or digits."""
+    length, alnum = _length_counts(value)
+    return length >= MIN_QUOTE_CHARS and alnum >= MIN_QUOTE_ALNUM
+
+
+def title_quote_meets_minimum(value: str) -> bool:
+    """Shorter floor for a title quote. Section quotes do not use this."""
+    length, alnum = _length_counts(value)
+    return length >= MIN_TITLE_CHARS and alnum >= MIN_TITLE_ALNUM
 
 
 def title_inside_quote(title: str, quote: str) -> bool:
@@ -633,6 +1095,7 @@ def accept_quote(
     covered: list[tuple[int, int]] | None = None,
     cited_section: str | None = None,
     spans: list[dict[str, Any]] | None = None,
+    for_title: bool = False,
 ) -> dict[str, Any]:
     """Ground a claim quote.
 
@@ -640,10 +1103,13 @@ def accept_quote(
     Unmatched and ambiguous ids are refused. `covered` is the character
     ranges actually sent to the model; a hit only in a truncated tail is
     not grounded. A hit that fails the length floor is not grounded either.
-    The search folds NFC, curly quotes, dashes, non-breaking spaces, and a
-    few ligatures (ff, fi, fl, ffi, ffl, st, and ij). It does not fold œ.
-    A hit is mapped back onto the original characters.
-    NFKC is not used for that search.
+    The search folds NFC, curly quotes, dashes, and a few ligatures (ff, fi,
+    fl, ffi, ffl, st, and ij). It does not fold œ. Runs of whitespace,
+    including newlines and Unicode spaces, collapse to one space. A soft
+    hyphen is dropped. A line-break hyphen joins only under the syllable
+    rule in `fold_for_match`. A hit is mapped back onto the original
+    characters, so the span still contains the newline or hyphen that was
+    folded away. NFKC is not used for that search.
     """
     claimed_start = start if _is_int(start) else None
     claimed_end = end if _is_int(end) else None
@@ -681,7 +1147,8 @@ def accept_quote(
                     break
         if chosen is None:
             continue
-        if not quote_meets_minimum(candidate):
+        meets = title_quote_meets_minimum(candidate) if for_title else quote_meets_minimum(candidate)
+        if not meets:
             return _ungrounded(candidate, chosen[0], chosen[1], "quote_too_short")
         return {
             "quote": candidate,
@@ -752,8 +1219,8 @@ def apply_grounding(
             spans=spans,
         )
 
-    def in_document(quote: Any, start: Any = None, end: Any = None) -> dict[str, Any]:
-        return accept_quote(quote, source, start, end, covered=covered)
+    def in_document(quote: Any, start: Any = None, end: Any = None, *, for_title: bool = False) -> dict[str, Any]:
+        return accept_quote(quote, source, start, end, covered=covered, for_title=for_title)
 
     for section in data["sections"]:
         _attach(
@@ -800,7 +1267,7 @@ def apply_grounding(
     data["plain_summary_grounded"] = summary_located["grounded"]
     data["plain_summary_grounding_reason"] = summary_located["grounding_reason"]
 
-    title_located = in_document(data.get("title_quote", ""))
+    title_located = in_document(data.get("title_quote", ""), for_title=True)
     if title_located.get("grounded") and not title_inside_quote(
         str(data.get("title") or ""), str(title_located.get("quote") or "")
     ):
@@ -836,7 +1303,7 @@ def apply_grounding(
 
 def _part_ranges(text: str) -> list[tuple[int, int]]:
     """Contiguous ranges covering the bill. Empty when fewer than two headings."""
-    matches = list(_HEADING.finditer(text))
+    matches = _heading_matches(text)
     if len(matches) < 2:
         return []
     starts = [0]
@@ -1035,6 +1502,21 @@ def flag_covers(flag_section: str, section_id: str) -> bool:
     return same_section(flag_section or "", section_id or "")
 
 
+def grounding_phrase(reason: str) -> str:
+    """Short abstain label for a grounding_reason.
+
+    The four vote-facing labels are "quote not found", "section mismatch",
+    "comparison unavailable", and "models disagree". Comparison phrases are
+    applied by the vote policy. This helper covers the quote check.
+    """
+    key = (reason or "").strip().lower()
+    if key in {"quote_not_in_section", "section_unmatched", "section_ambiguous"}:
+        return "section mismatch"
+    if key == "quote_too_short":
+        return "quote too short"
+    return "quote not found"
+
+
 def section_block_reason(analysis: dict[str, Any], section_id: str) -> str:
     """Why this section must not receive a yes or no. Empty when it may."""
     reasons: list[str] = []
@@ -1047,7 +1529,8 @@ def section_block_reason(analysis: dict[str, Any], section_id: str) -> str:
             matched = section
             break
     if matched is not None and matched.get("grounded") is False:
-        reasons.append("Section summary is ungrounded (no verbatim quote in the bill).")
+        phrase = grounding_phrase(str(matched.get("grounding_reason") or ""))
+        reasons.append(f"Section summary is ungrounded ({phrase}).")
     for flag in ungrounded_high_severity_flags(analysis):
         target = str(flag.get("section") or "")
         covers = flag_covers(target, section_id)
@@ -1055,8 +1538,9 @@ def section_block_reason(analysis: dict[str, Any], section_id: str) -> str:
             covers = covers or flag_covers(target, str(matched.get("section_id", "")))
         if covers:
             label = flag.get("type") or "flag"
+            phrase = grounding_phrase(str(flag.get("grounding_reason") or ""))
             reasons.append(
-                f"Ungrounded high-severity flag ({label}) refers to this section and was withheld."
+                f"Ungrounded high-severity flag ({label}) refers to this section ({phrase}) and was withheld."
             )
             break
     if not reasons:

@@ -28,6 +28,7 @@ from backend.grounding import (
     ANALYSIS_DATA_END,
     downstream_sections,
     flag_covers,
+    grounding_phrase,
     prompt_title,
     same_section,
     section_block_reason,
@@ -195,9 +196,19 @@ def _build_bill_block(analysis: dict[str, Any]) -> str:
     ]
     if withheld_sections:
         labels = [_short_id(str(s.get("section_id", ""))) for s in withheld_sections]
+        details = [
+            _short_id(str(s.get("section_id", "")))
+            + " ("
+            + grounding_phrase(str(s.get("grounding_reason") or ""))
+            + ")"
+            for s in withheld_sections
+        ]
         notes.append(
-            "WITHHELD section summaries have no verbatim quote in the bill. "
-            "Do not vote yes or no on: " + ", ".join(labels) + "."
+            "WITHHELD section summaries: "
+            + ", ".join(details)
+            + ". Do not vote yes or no on: "
+            + ", ".join(labels)
+            + "."
         )
     high = ungrounded_high_severity_flags(analysis)
     if high:
@@ -213,13 +224,21 @@ def _build_bill_block(analysis: dict[str, Any]) -> str:
             1 for c in claims if isinstance(c, dict) and c.get("grounded") is not True
         )
         if withheld_claims:
+            phrases = []
+            for claim in claims:
+                if isinstance(claim, dict) and claim.get("grounded") is not True:
+                    phrase = grounding_phrase(str(claim.get("grounding_reason") or ""))
+                    if phrase not in phrases:
+                        phrases.append(phrase)
+            detail = ", ".join(phrases) if phrases else "quote not found"
             notes.append(
-                f"{withheld_claims} beneficiary claim(s) were withheld because they had no verbatim quote."
+                f"{withheld_claims} beneficiary claim(s) were withheld ({detail})."
             )
 
     lines = [f"BILL ANALYSIS: {prompt_title(analysis)}", ""]
     if analysis.get("plain_summary_grounded") is False:
-        lines.append("Plain summary: withheld (no verbatim quote in the bill).")
+        phrase = grounding_phrase(str(analysis.get("plain_summary_grounding_reason") or ""))
+        lines.append(f"Plain summary: withheld ({phrase}).")
     else:
         lines.append(f"Plain summary: {analysis.get('plain_summary', '')}")
     lines.append("")
@@ -429,13 +448,23 @@ def cast_vote(
 
     sections = [s for s in analysis.get("sections") or [] if isinstance(s, dict)]
     if sections and not downstream_sections(analysis):
+        phrases: list[str] = []
+        for section in sections:
+            if section.get("grounded") is False:
+                phrase = grounding_phrase(str(section.get("grounding_reason") or ""))
+                if phrase not in phrases:
+                    phrases.append(phrase)
+        detail = ", ".join(phrases) if phrases else "quote not found"
         if ungrounded_high_severity_flags(analysis):
             reason = (
                 "Ungrounded high-severity flags were withheld, and every section summary "
-                "is ungrounded. The Avatar did not cast a yes or no."
+                f"is ungrounded ({detail}). The Avatar did not cast a yes or no."
             )
         else:
-            reason = "Every section summary is ungrounded. The Avatar did not cast a yes or no."
+            reason = (
+                f"Every section summary is ungrounded ({detail}). "
+                "The Avatar did not cast a yes or no."
+            )
         return _abstain_for_block(analysis, reason, truncation=False)
     if not sections and ungrounded_high_severity_flags(analysis):
         return _abstain_for_block(

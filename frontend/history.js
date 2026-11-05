@@ -55,9 +55,14 @@ function render(events) {
 function detail(e) {
   const d = e.details || {};
   switch (e.event_type) {
-    case 'vote_cast':
+    case 'vote_cast': {
+      const review = Number(d.needs_human_review) || 0;
+      const reviewText = review
+        ? `, <span class="badge-review">${review} needs human review</span>`
+        : '';
       return `<strong>${escHtml(d.bill_title || 'a bill')}</strong> — ${d.sections} sections · `
-        + `${d.yes} yes, ${d.no} no, ${d.abstain} abstain`;
+        + `${d.yes} yes, ${d.no} no, ${d.abstain} abstain${reviewText}`;
+    }
     case 'vote_overridden':
       return `<strong>${escHtml(d.bill_title || '')}</strong> · ${escHtml(d.section_id || '')}: `
         + `<span class="muted">${escHtml(d.from || '?')}</span> → <strong>${escHtml(d.to || '?')}</strong>`;

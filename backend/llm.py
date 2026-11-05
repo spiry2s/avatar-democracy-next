@@ -59,6 +59,50 @@ class LLMConfigError(RuntimeError):
     """
 
 
+class LLMTruncatedError(Exception):
+    """The model hit its output limit or returned no text.
+
+    This is not a JSON error. Callers must not parse the partial reply.
+    A schema retry would spend the same budget and hide the real cause.
+    """
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    """Token counts from one model call. Missing fields stay None."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+
+def _as_token_count(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def output_budget(max_tokens: int | None) -> int:
+    """The max_tokens value to send. None means the configured default."""
+    if max_tokens is None:
+        return config.LLM_MAX_TOKENS
+    return max_tokens
+
+
+def _truncated_message(finish_reason: str | None) -> str:
+    shown = "empty" if finish_reason is None else finish_reason
+    return (
+        f"Model output was cut off (finish_reason={shown!r}). "
+        "The reply was not parsed as JSON. Increase LLM_MAX_TOKENS or "
+        "COMPARISON_MAX_TOKENS. Reasoning models can spend the whole budget "
+        "on reasoning tokens and return nothing."
+    )
+
+
 class LLMProvider(ABC):
     """Send a system prompt and a user prompt; get text or JSON back."""
 
@@ -69,16 +113,27 @@ class LLMProvider(ABC):
         """Whether `complete` takes `data_blocks` outside the instruction string."""
         return False
 
+    def note_usage(self, usage: TokenUsage) -> None:
+        """Remember one call's token counts. Safe if a subclass has no __init__."""
+        log = getattr(self, "usage_log", None)
+        if log is None:
+            log = []
+            self.usage_log = log
+        log.append(usage)
+
     @abstractmethod
     def complete(
         self,
         *,
         user: str,
         system: str | None = None,
-        max_tokens: int = 8000,
+        max_tokens: int | None = None,
         data_blocks: Sequence[DataBlock] | None = None,
     ) -> str:
         """Return the assistant text for this prompt pair.
+
+        `max_tokens` None uses `LLM_MAX_TOKENS`. A cut-off reply raises
+        `LLMTruncatedError` instead of returning text that a caller might parse.
 
         `data_blocks` is untrusted text. Implementations that cannot give it
         its own content block should ignore the argument; callers check
@@ -90,25 +145,29 @@ class LLMProvider(ABC):
         *,
         user: str,
         system: str | None = None,
-        max_tokens: int = 8000,
+        max_tokens: int | None = None,
         error_prefix: str = "Could not parse response as JSON",
         data_blocks: Sequence[DataBlock] | None = None,
     ) -> Any:
         """Return parsed JSON. Strips one leading markdown fence.
 
+        A truncated or empty reply is never passed to `json.loads`.
+
         Raises:
+            LLMTruncatedError: the model stopped for length or returned no text.
             ValueError: the model text is not JSON. The message includes a
                 short snippet of the text, matching the historical parsers.
         """
         kwargs: dict[str, Any] = {
             "user": user,
             "system": system,
-            "max_tokens": max_tokens,
+            "max_tokens": output_budget(max_tokens),
         }
         # Only forward data blocks when the caller actually has some, so a
         # provider whose complete() predates the argument still works.
         if data_blocks:
             kwargs["data_blocks"] = list(data_blocks)
+        # complete() raises LLMTruncatedError before this can see the text.
         text = strip_markdown_fences(self.complete(**kwargs))
         try:
             return json.loads(text)
@@ -126,6 +185,75 @@ def strip_markdown_fences(text: str) -> str:
         end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
         text = "\n".join(lines[1:end])
     return text
+
+
+def _anthropic_usage(message: Any) -> TokenUsage:
+    usage = getattr(message, "usage", None)
+    if usage is None:
+        return TokenUsage()
+    if isinstance(usage, dict):
+        reasoning = usage.get("reasoning_tokens")
+        details = usage.get("output_tokens_details") or usage.get("completion_tokens_details")
+        if reasoning is None and isinstance(details, dict):
+            reasoning = details.get("reasoning_tokens")
+        return TokenUsage(
+            input_tokens=_as_token_count(usage.get("input_tokens")),
+            output_tokens=_as_token_count(usage.get("output_tokens")),
+            reasoning_tokens=_as_token_count(reasoning),
+        )
+    reasoning = getattr(usage, "reasoning_tokens", None)
+    return TokenUsage(
+        input_tokens=_as_token_count(getattr(usage, "input_tokens", None)),
+        output_tokens=_as_token_count(getattr(usage, "output_tokens", None)),
+        reasoning_tokens=_as_token_count(reasoning),
+    )
+
+
+def _openai_usage(payload: Any) -> TokenUsage:
+    if not isinstance(payload, dict):
+        return TokenUsage()
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return TokenUsage()
+    reasoning = _as_token_count(usage.get("reasoning_tokens"))
+    details = usage.get("completion_tokens_details")
+    if reasoning is None and isinstance(details, dict):
+        reasoning = _as_token_count(details.get("reasoning_tokens"))
+    return TokenUsage(
+        input_tokens=_as_token_count(usage.get("prompt_tokens", usage.get("input_tokens"))),
+        output_tokens=_as_token_count(usage.get("completion_tokens", usage.get("output_tokens"))),
+        reasoning_tokens=reasoning,
+    )
+
+
+def consume_usage(provider: LLMProvider, *, role: str) -> list[dict[str, Any]]:
+    """Sum recorded calls for one model and clear the log.
+
+    Returns an empty list when the provider reported no counts, so a fake
+    provider does not invent zeros.
+    """
+    log = list(getattr(provider, "usage_log", []) or [])
+    if hasattr(provider, "usage_log") and isinstance(provider.usage_log, list):
+        provider.usage_log.clear()
+    if not log:
+        return []
+
+    def total(name: str) -> int | None:
+        values = [_as_token_count(getattr(item, name, None)) for item in log]
+        numbers = [value for value in values if value is not None]
+        return sum(numbers) if numbers else None
+
+    return [
+        {
+            "role": role,
+            "provider": getattr(provider, "provider_id", "") or "",
+            "model": getattr(provider, "model", "") or "",
+            "input_tokens": total("input_tokens"),
+            "output_tokens": total("output_tokens"),
+            "reasoning_tokens": total("reasoning_tokens"),
+            "calls": len(log),
+        }
+    ]
 
 
 class AnthropicProvider(LLMProvider):
@@ -161,12 +289,13 @@ class AnthropicProvider(LLMProvider):
         *,
         user: str,
         system: str | None = None,
-        max_tokens: int = 8000,
+        max_tokens: int | None = None,
         data_blocks: Sequence[DataBlock] | None = None,
     ) -> str:
         # No data blocks: a single string, matching the historical messages.create
         # calls. With data blocks, the instruction text and each document are
         # separate content blocks. The document is still model input.
+        budget = output_budget(max_tokens)
         if data_blocks:
             content: Any = [{"type": "text", "text": user}]
             for block in data_blocks:
@@ -190,17 +319,33 @@ class AnthropicProvider(LLMProvider):
             content = user
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": max_tokens,
+            "max_tokens": budget,
             "messages": [{"role": "user", "content": content}],
         }
         # Omit `system` entirely when the caller has none. That matches the
         # historical messages.create calls for axis tags, drift, and conflicts.
         if system is not None:
             kwargs["system"] = system
-        message = self._anthropic().messages.create(**kwargs)
-        return "".join(
+        # messages.create refuses a budget that might run longer than 10 minutes
+        # (ValueError: "Streaming is required..."). Streaming returns the same
+        # final message, including stop_reason and usage.
+        message = _anthropic_final_message(self._anthropic(), kwargs)
+        self.note_usage(_anthropic_usage(message))
+        text = "".join(
             block.text for block in message.content if hasattr(block, "text")
         ).strip()
+        stop = getattr(message, "stop_reason", None)
+        # Anthropic's length stop is "max_tokens". "length" is accepted so a
+        # compatible client that uses the OpenAI name is treated the same way.
+        if stop in {"max_tokens", "length"} or not text:
+            raise LLMTruncatedError(_truncated_message(stop if isinstance(stop, str) else None))
+        return text
+
+
+def _anthropic_final_message(client: Any, kwargs: dict[str, Any]) -> Any:
+    """Collect the final streamed Messages response. Does not call messages.create."""
+    with client.messages.stream(**kwargs) as stream:
+        return stream.get_final_message()
 
 
 def chat_completions_url(base_url: str) -> str:
@@ -213,17 +358,7 @@ def chat_completions_url(base_url: str) -> str:
     return base + "/chat/completions"
 
 
-def _assistant_text(payload: Any) -> str:
-    """Pull assistant text out of a chat-completions JSON body."""
-    if not isinstance(payload, dict):
-        raise ValueError("OpenAI-compatible response was not a JSON object")
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise ValueError("OpenAI-compatible response had no choices")
-    message = choices[0].get("message")
-    if not isinstance(message, dict):
-        raise ValueError("OpenAI-compatible response choice had no message")
-    content = message.get("content")
+def _message_text(content: Any) -> str:
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
@@ -233,10 +368,31 @@ def _assistant_text(payload: Any) -> str:
                 parts.append(part)
             elif isinstance(part, dict) and isinstance(part.get("text"), str):
                 parts.append(part["text"])
-        text = "".join(parts).strip()
-        if text:
-            return text
-    raise ValueError("OpenAI-compatible response message had no text content")
+        return "".join(parts).strip()
+    return ""
+
+
+def _assistant_text(payload: Any) -> str:
+    """Pull assistant text out of a chat-completions JSON body.
+
+    A length stop or an empty body raises LLMTruncatedError. The partial
+    string is not returned, so complete_json cannot parse it.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("OpenAI-compatible response was not a JSON object")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ValueError("OpenAI-compatible response had no choices")
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("OpenAI-compatible response choice had no message")
+    finish = choice.get("finish_reason")
+    finish_text = finish.strip().lower() if isinstance(finish, str) else None
+    text = _message_text(message.get("content"))
+    if finish_text == "length" or not text:
+        raise LLMTruncatedError(_truncated_message(finish if isinstance(finish, str) else None))
+    return text
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -284,19 +440,20 @@ class OpenAICompatibleProvider(LLMProvider):
         *,
         user: str,
         system: str | None = None,
-        max_tokens: int = 8000,
+        max_tokens: int | None = None,
         data_blocks: Sequence[DataBlock] | None = None,
     ) -> str:
         # data_blocks is ignored. Callers check accepts_data_blocks and fence
         # the bill into `user` instead of sending a document block.
         del data_blocks
+        budget = output_budget(max_tokens)
         messages: list[dict[str, str]] = []
         if system is not None:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": user})
         body = {
             "model": self.model,
-            "max_tokens": max_tokens,
+            "max_tokens": budget,
             "messages": messages,
         }
         headers = {
@@ -314,7 +471,9 @@ class OpenAICompatibleProvider(LLMProvider):
             raise RuntimeError(
                 f"OpenAI-compatible request failed with HTTP {response.status_code}"
             ) from None
-        return _assistant_text(response.json())
+        payload = response.json()
+        self.note_usage(_openai_usage(payload))
+        return _assistant_text(payload)
 
 
 def _anthropic(model: str) -> LLMProvider:

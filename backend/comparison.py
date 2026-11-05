@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from backend import config, llm, summarizer
+from backend.grounding import flag_covers, flag_targets_all
 
 
 # A flag aimed at no single section. Same labels the grounding work uses
@@ -1114,6 +1116,7 @@ def build_report(
     )
     return {
         "enabled": True,
+        "status": "available",
         "policy": policy,
         "policy_label": _POLICY_LABELS[policy],
         "primary": {
@@ -1160,6 +1163,57 @@ def _flag_hits(item: dict[str, Any], section_id: str) -> bool:
     return False
 
 
+_SECRET_TEXT = re.compile(
+    r"(sk-ant-[A-Za-z0-9_\-]{6,}|sk-[A-Za-z0-9_\-]{8,}|Bearer\s+\S+)",
+    re.IGNORECASE,
+)
+
+
+def _public_failure(exc: BaseException) -> str:
+    """A short reason safe to put in the API response. No key material."""
+    text = f"{type(exc).__name__}: {exc}"
+    text = _SECRET_TEXT.sub("[redacted]", text)
+    text = " ".join(text.split())
+    if len(text) > 400:
+        text = text[:400] + "..."
+    return text or type(exc).__name__
+
+
+def _primary_high_on_section(analysis: dict[str, Any], section_id: str) -> bool:
+    """True when the primary analysis has a high-severity flag on this section."""
+    for flag in analysis.get("red_flags") or []:
+        if not isinstance(flag, dict):
+            continue
+        if str(flag.get("severity") or "").strip().lower() != "high":
+            continue
+        target = str(flag.get("section") or "")
+        if flag_targets_all(target) or flag_covers(target, section_id):
+            return True
+    return False
+
+
+def _unavailable_note(policy: str, reason: str, prior: str, *, withhold_high: bool = False) -> str:
+    why = "comparison unavailable"
+    if reason:
+        why += f" ({reason})"
+    prior_label = prior or "abstain"
+    if withhold_high:
+        return (
+            f"{why}. The primary model raised a high-severity flag on this section "
+            f"and voted {prior_label}. That flag was not checked, so the Avatar abstained."
+        )
+    if policy == "review":
+        return (
+            f"{why}. The primary model voted {prior_label}. "
+            "That yes or no is kept and flagged for human review. "
+            "A failed comparison is not agreement, and it is not an unflagged yes."
+        )
+    return (
+        f"{why}. The primary model voted {prior_label}; the Avatar abstained instead. "
+        "A failed comparison is not a yes."
+    )
+
+
 def _policy_note(policy: str, hits: list[dict[str, Any]], prior: str) -> str:
     bits: list[str] = []
     for item in hits:
@@ -1181,12 +1235,12 @@ def _policy_note(policy: str, hits: list[dict[str, Any]], prior: str) -> str:
     prior_label = prior or "abstain"
     if policy == "review":
         return (
-            f"The models disagree on a high-severity red flag ({detail}). "
+            f"models disagree on a high-severity red flag ({detail}). "
             f"The primary model voted {prior_label}. That yes or no is kept and "
             "only flagged for human review. It is not withheld."
         )
     return (
-        f"The models disagree on a high-severity red flag ({detail}). "
+        f"models disagree on a high-severity red flag ({detail}). "
         f"The primary model voted {prior_label}; the Avatar abstained instead, "
         "so neither model overrode the other."
     )
@@ -1200,9 +1254,12 @@ def apply_vote_policy(section_votes: list[Any], analysis: dict[str, Any]) -> set
     alone is unchanged.
 
     `abstain` (default) replaces the position. `review` keeps the primary
-    position, marks `needs_human_review`, and lowers confidence. The recorded
-    position in review mode still counts in a chamber tally; abstain does not
-    add a yes or no. Abstain is the conservative default for that reason.
+    position and marks `needs_human_review` when the section has no primary
+    high-severity flag. A needs_human_review yes or no is not a clean automatic
+    vote: the chamber tally counts it separately. If the comparison is
+    unavailable and the primary already raised a high-severity flag on the
+    section, the vote abstains instead of staying a flagged yes. Abstain is
+    the conservative default.
     """
     report = analysis.get("model_comparison") if isinstance(analysis, dict) else None
     if not isinstance(report, dict) or not report.get("enabled"):
@@ -1210,6 +1267,30 @@ def apply_vote_policy(section_votes: list[Any], analysis: dict[str, Any]) -> set
     policy = str(report.get("policy") or "abstain").strip().lower()
     if policy not in _POLICY_LABELS:
         policy = "abstain"
+    if str(report.get("status") or "").strip().lower() == "unavailable":
+        reason = str(report.get("unavailable_reason") or "")
+        abstained: set[str] = set()
+        for vote in section_votes:
+            prior = str(getattr(vote, "position", "") or "")
+            section_id = str(getattr(vote, "section_id", "") or "")
+            withhold_high = _primary_high_on_section(analysis, section_id)
+            vote.comparison_prior_position = prior
+            vote.comparison_note = _unavailable_note(
+                policy, reason, prior, withhold_high=withhold_high and policy == "review"
+            )
+            vote.confidence = "low"
+            # review keeps a yes or no only when the primary raised no high-severity
+            # flag on this section. A high flag that the comparison never checked
+            # abstains, the same as the default policy.
+            if policy == "review" and not withhold_high:
+                vote.needs_human_review = True
+                vote.comparison_abstained = False
+            else:
+                vote.position = "abstain"
+                vote.comparison_abstained = True
+                vote.needs_human_review = False
+                abstained.add(section_id)
+        return abstained
     items = [item for item in report.get("high_severity_disagreements") or [] if isinstance(item, dict)]
     if not items:
         return set()
@@ -1315,16 +1396,72 @@ def model_relationship(
     return "different"
 
 
+def _empty_report_lists() -> dict[str, list[Any]]:
+    return {
+        "sections_only_primary": [],
+        "sections_only_comparison": [],
+        "sections_materially_different": [],
+        "red_flags_only_primary": [],
+        "red_flags_only_comparison": [],
+        "high_severity_disagreements": [],
+        "beneficiary_differences": [],
+        "beneficiary_group_conflicts": [],
+    }
+
+
+def _unavailable_report(
+    *,
+    reason: str,
+    policy: str,
+    primary_info: dict[str, str],
+    comparison_info: dict[str, str],
+) -> dict[str, Any]:
+    """A failed comparison. This is not agreement and must not be read as one."""
+    policy = policy if policy in _POLICY_LABELS else "abstain"
+    report = {
+        "enabled": True,
+        "status": "unavailable",
+        "unavailable_reason": reason,
+        "policy": policy,
+        "policy_label": _POLICY_LABELS[policy],
+        "primary": {
+            "provider": primary_info.get("provider") or "",
+            "model": primary_info.get("model") or "",
+        },
+        "comparison": {
+            "provider": comparison_info.get("provider") or "",
+            "model": comparison_info.get("model") or "",
+        },
+        "matching": ["section_id", "quote", "text_overlap"],
+        "note": (
+            "comparison unavailable. The comparison model call failed, so there "
+            "is no second analysis to agree with. This is not agreement. "
+            "The Avatar abstains on every section, or flags each one for human "
+            "review when COMPARISON_VOTE_POLICY=review. A failed check is not a yes."
+        ),
+    }
+    report.update(_empty_report_lists())
+    return report
+
+
+def _merge_usage(analysis: dict[str, Any], extra: list[dict[str, Any]]) -> None:
+    current = list(analysis.get("token_usage") or [])
+    current.extend(extra)
+    analysis["token_usage"] = current
+
+
 def analyze_for_api(bill_text: str) -> dict[str, Any]:
     """Primary analysis, plus a comparison report when that provider is configured.
 
     Both passes call `summarizer.analyze_bill`, so they share the prompt, the
-    truncation, and the JSON parse. A comparison failure is raised rather than
-    hidden: a missing key or a bad response must not look like agreement.
+    truncation, and the JSON parse. They run concurrently. A missing comparison
+    credential or a same-vendor pair still fails before either call. A failure
+    of the comparison call itself keeps the primary analysis and marks the
+    comparison unavailable. That is not agreement.
     """
     comparison_provider = None
     if comparison_configured():
-        # Fail before the primary call when the comparison role is misconfigured.
+        # Fail before either call when the comparison role is misconfigured.
         comparison_provider = llm.get_provider("comparison")
         primary_id = (config.LLM_PROVIDER or "anthropic").strip().lower() or "anthropic"
         primary_model = llm.model_for(primary_id, "primary")
@@ -1343,25 +1480,69 @@ def analyze_for_api(bill_text: str) -> dict[str, Any]:
                 "Sonnet and Haiku are the same vendor. "
                 "This is not an independent check."
             )
-    primary = summarizer.analyze_bill(bill_text).to_dict()
     if comparison_provider is None:
-        return primary
-    other = summarizer.analyze_bill(bill_text, provider=comparison_provider)
+        return summarizer.analyze_bill(bill_text).to_dict()
+
     policy = config.COMPARISON_VOTE_POLICY
     if policy not in _POLICY_LABELS:
         policy = "abstain"
     primary_provider = (config.LLM_PROVIDER or "anthropic").strip().lower() or "anthropic"
+    primary_info = {
+        "provider": primary_provider,
+        "model": llm.model_for(primary_provider, "primary"),
+    }
+    comparison_info = {
+        "provider": comparison_provider.provider_id,
+        "model": comparison_provider.model,
+    }
+
+    def _run_primary() -> summarizer.BillAnalysis:
+        return summarizer.analyze_bill(bill_text)
+
+    def _run_comparison() -> summarizer.BillAnalysis:
+        return summarizer.analyze_bill(
+            bill_text,
+            provider=comparison_provider,
+            max_tokens=config.COMPARISON_MAX_TOKENS,
+            usage_role="comparison",
+        )
+
+    primary_error: BaseException | None = None
+    comparison_error: BaseException | None = None
+    primary_result: summarizer.BillAnalysis | None = None
+    other_result: summarizer.BillAnalysis | None = None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        primary_future = pool.submit(_run_primary)
+        comparison_future = pool.submit(_run_comparison)
+        try:
+            primary_result = primary_future.result()
+        except Exception as exc:
+            primary_error = exc
+        try:
+            other_result = comparison_future.result()
+        except Exception as exc:
+            comparison_error = exc
+    if primary_error is not None:
+        raise primary_error
+    assert primary_result is not None
+    primary = primary_result.to_dict()
+    if comparison_error is not None:
+        failed_usage = llm.consume_usage(comparison_provider, role="comparison")
+        _merge_usage(primary, failed_usage)
+        primary["model_comparison"] = _unavailable_report(
+            reason=_public_failure(comparison_error),
+            policy=policy,
+            primary_info=primary_info,
+            comparison_info=comparison_info,
+        )
+        return primary
+    assert other_result is not None
+    _merge_usage(primary, list(other_result.token_usage or []))
     report = build_report(
         primary,
-        other.to_dict(),
-        primary_info={
-            "provider": primary_provider,
-            "model": llm.model_for(primary_provider, "primary"),
-        },
-        comparison_info={
-            "provider": comparison_provider.provider_id,
-            "model": comparison_provider.model,
-        },
+        other_result.to_dict(),
+        primary_info=primary_info,
+        comparison_info=comparison_info,
         policy=policy,
     )
     primary["model_comparison"] = report

@@ -139,12 +139,22 @@ function renderVote(vote) {
 }
 
 function renderTally(vote) {
-  const counts = { yes: 0, no: 0, abstain: 0 };
-  vote.section_votes.forEach(v => { counts[v.position] = (counts[v.position] || 0) + 1; });
+  const counts = { yes: 0, no: 0, abstain: 0, needs_human_review: 0 };
+  vote.section_votes.forEach(v => {
+    if (v.needs_human_review && (v.position === 'yes' || v.position === 'no')) {
+      counts.needs_human_review += 1;
+      return;
+    }
+    counts[v.position] = (counts[v.position] || 0) + 1;
+  });
+  const review = counts.needs_human_review
+    ? `<span class="tally-pill badge-review">${counts.needs_human_review} needs human review</span>`
+    : '';
   document.getElementById('tally').innerHTML = `
     <span class="tally-pill tally-yes">${counts.yes} yes</span>
     <span class="tally-pill tally-no">${counts.no} no</span>
-    <span class="tally-pill tally-abstain">${counts.abstain} abstain</span>`;
+    <span class="tally-pill tally-abstain">${counts.abstain} abstain</span>
+    ${review}`;
 }
 
 function renderSection(v, idx) {

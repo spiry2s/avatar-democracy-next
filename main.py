@@ -10,7 +10,7 @@ Run with:
     python main.py
 
 Or with uvicorn directly:
-    uvicorn main:app --host 0.0.0.0 --port 8000
+    uvicorn main:app --host 127.0.0.1 --port 8000
 """
 
 from __future__ import annotations
@@ -63,6 +63,26 @@ class AnalyzeTextRequest(BaseModel):
 
     text: str
     source_url: Optional[str] = None
+
+
+def _is_model_text_error(exc: ValueError) -> bool:
+    """True when the model text failed JSON parsing or the analysis schema.
+
+    A provider ValueError, such as the Anthropic SDK requiring streaming, is
+    not model text and must not be reported as unparseable output.
+    """
+    text = str(exc)
+    return text.startswith("Could not parse") or text.startswith("Analysis JSON failed schema")
+
+
+def _output_status(exc: ValueError) -> int:
+    return 502 if _is_model_text_error(exc) else 500
+
+
+def _output_detail(exc: ValueError) -> str:
+    if _is_model_text_error(exc):
+        return f"Analysis produced unparseable output: {exc}"
+    return f"Analysis failed: {exc}"
 
 
 def _serve(filename: str) -> FileResponse:
@@ -119,10 +139,19 @@ async def health() -> dict:
     """Health check. Reports whether the configured LLM provider has a credential.
 
     With the default Anthropic provider this is whether ANTHROPIC_API_KEY is set.
+    Comparison fields name the configured provider and model only. The response
+    never includes an API key or any other secret.
     """
+    configured = comparison.comparison_configured()
+    provider = (config.COMPARISON_PROVIDER or "").strip().lower() if configured else ""
+    model = (config.COMPARISON_MODEL or "").strip() if configured else ""
     return {
         "status": "ok",
         "api_key_configured": llm.credentials_configured(),
+        "comparison_configured": configured,
+        "comparison_provider": provider,
+        "comparison_model": model,
+        "comparison_key_configured": bool(provider) and llm.credentials_configured(provider),
     }
 
 
@@ -184,15 +213,14 @@ async def analyze(
     # Run the analysis
     try:
         analysis = comparison.analyze_for_api(bill_text)
+    except llm.LLMTruncatedError as e:
+        # A cut-off reply is not unparseable JSON. Say so.
+        raise HTTPException(status_code=502, detail=str(e)) from e
     except RuntimeError as e:
         # Configuration errors (missing API key)
         raise HTTPException(status_code=500, detail=str(e)) from e
     except ValueError as e:
-        # Parsing errors
-        raise HTTPException(
-            status_code=502,
-            detail=f"Analysis produced unparseable output: {str(e)}",
-        ) from e
+        raise HTTPException(status_code=_output_status(e), detail=_output_detail(e)) from e
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -362,16 +390,26 @@ async def avatar_vote(req: VoteRequest) -> JSONResponse:
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=502, detail=f"Avatar produced unparseable output: {e}") from e
+        if _is_model_text_error(e):
+            detail = f"Avatar produced unparseable output: {e}"
+            status = 502
+        else:
+            detail = f"Vote failed: {e}"
+            status = 500
+        raise HTTPException(status_code=status, detail=detail) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Vote failed: {e}") from e
 
     audit.log_event("vote_cast", {
         "bill_title": vote.bill_title,
         "sections": len(vote.section_votes),
-        "yes": sum(1 for v in vote.section_votes if v.position == "yes"),
-        "no": sum(1 for v in vote.section_votes if v.position == "no"),
+        "yes": sum(1 for v in vote.section_votes if v.position == "yes" and not v.needs_human_review),
+        "no": sum(1 for v in vote.section_votes if v.position == "no" and not v.needs_human_review),
         "abstain": sum(1 for v in vote.section_votes if v.position == "abstain"),
+        "needs_human_review": sum(
+            1 for v in vote.section_votes
+            if v.needs_human_review and v.position in ("yes", "no")
+        ),
     })
     return JSONResponse(content={"vote": vote.to_dict()})
 
@@ -571,7 +609,13 @@ async def vote_on_bill(bill_id: str) -> JSONResponse:
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=502, detail=f"Produced unparseable output: {e}") from e
+        if _is_model_text_error(e):
+            detail = f"Produced unparseable output: {e}"
+            status = 502
+        else:
+            detail = f"Vote failed: {e}"
+            status = 500
+        raise HTTPException(status_code=status, detail=detail) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Vote failed: {e}") from e
 
@@ -612,12 +656,35 @@ async def regenerate_population(req: RegeneratePopulationRequest) -> JSONRespons
     return JSONResponse(content=population.distribution(citizens))
 
 
+def ensure_port_available(host: str, port: int) -> None:
+    """Exit before the startup banner when the bind port is already taken."""
+    import errno
+    import socket
+    import sys
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            print(
+                f"Port {port} on {host} is already in use. "
+                "Set PORT to a free port and start again.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from exc
+        raise
+    finally:
+        sock.close()
+
+
 def main() -> None:
     """Entry point for `python main.py`."""
     import uvicorn
 
     port = int(os.environ.get("PORT", "8000"))
     host = os.environ.get("HOST", "127.0.0.1")
+    ensure_port_available(host, port)
 
     print(f"Starting Bill Summarizer on http://{host}:{port}")
     print(f"LLM provider: {config.LLM_PROVIDER} (primary model {config.MODEL})")

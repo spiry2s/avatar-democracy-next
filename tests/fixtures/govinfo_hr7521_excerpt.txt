@@ -1,0 +1,58 @@
+=== SOURCE: govinfo BILLS-118hr7521ih, SEC. 1 and SEC. 2(a)-(b), original hard line breaks and indentation ===
+SECTION 1. SHORT TITLE.
+
+    This Act may be cited as the ``Protecting Americans from Foreign 
+Adversary Controlled Applications Act''.
+
+SEC. 2. PROHIBITION OF FOREIGN ADVERSARY CONTROLLED APPLICATIONS.
+
+    (a) In General.--
+            (1) Prohibition of foreign adversary controlled 
+        applications.--It shall be unlawful for an entity to 
+        distribute, maintain, or update (or enable the distribution, 
+        maintenance, or updating of) a foreign adversary controlled 
+        application by carrying out, within the land or maritime 
+        borders of the United States, any of the following:
+                    (A) Providing services to distribute, maintain, or 
+                update such foreign adversary controlled application 
+                (including any source code of such application) by 
+                means of a marketplace (including an online mobile 
+                application store) through which users within the land 
+                or maritime borders of the United States may access, 
+                maintain, or update such application.
+                    (B) Providing internet hosting services to enable 
+                the distribution, maintenance, or updating of such 
+                foreign adversary controlled application for users 
+                within the land or maritime borders of the United 
+                States.
+            (2) Applicability.--Subsection (a) shall apply--
+                    (A) in the case of an application that satisfies 
+                the definition of a foreign adversary controlled 
+                application pursuant to subsection (g)(3)(A), beginning 
+                on the date that is 180 days after the date of the 
+                enactment of this Act; and
+                    (B) in the case of an application that satisfies 
+                the definition of a foreign adversary controlled 
+                application pursuant to subsection (g)(3)(B), beginning 
+                on the date that is 180 days after the date of the 
+                relevant determination of the President under such 
+                subsection.
+    (b) Data and Information Portability to Alternative Applications.--
+Before the date on which a prohibition under subsection (a) applies to 
+a foreign adversary controlled application, the entity that owns or 
+controls such application shall provide, upon request by a user of such 
+application within the land or maritime borders of United States, to 
+such user all the available data related to the account of such user 
+with respect to such application. Such data shall be provided in a 
+machine readable format and shall include any data maintained by such 
+application with respect to the account of such user, including content 
+(including posts, photos, and videos) and all other account 
+information.
+
+=== MODEL QUOTES THAT FAILED (from raw/us_analyze_run2.json) ===
+--- section_id='Sec. 1' grounding_reason=quote_not_in_source whitespace-collapsed match: True
+This Act may be cited as the ``Protecting Americans from Foreign Adversary Controlled Applications Act''.
+--- section_id='Sec. 2(a)' grounding_reason=quote_not_in_source whitespace-collapsed match: True
+It shall be unlawful for an entity to distribute, maintain, or update (or enable the distribution, maintenance, or updating of) a foreign adversary controlled application by carrying out, within the land or maritime borders of the United States, any of the following
+--- section_id='Sec. 2(b)' grounding_reason=quote_not_in_source whitespace-collapsed match: True
+the entity that owns or controls such application shall provide, upon request by a user of such application within the land or maritime borders of United States, to such user all the available data related to the account of such user

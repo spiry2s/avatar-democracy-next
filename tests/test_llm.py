@@ -232,16 +232,31 @@ def test_anthropic_complete_matches_messages_api(monkeypatch):
     monkeypatch.setattr(config, "MODEL", "claude-sonnet-4-6")
     calls: dict[str, Any] = {}
 
-    class FakeMessages:
-        def create(self, **kwargs):
-            calls["kwargs"] = kwargs
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def get_final_message(self):
             return SimpleNamespace(
                 content=[
                     SimpleNamespace(),  # non-text block, ignored
                     SimpleNamespace(text="part-a"),
                     SimpleNamespace(text=" part-b"),
-                ]
+                ],
+                stop_reason="end_turn",
+                usage=None,
             )
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            raise AssertionError("non-streaming messages.create was called")
+
+        def stream(self, **kwargs):
+            calls["kwargs"] = kwargs
+            return FakeStream()
 
     class FakeClient:
         def __init__(self, api_key):
@@ -268,12 +283,83 @@ def test_anthropic_complete_matches_messages_api(monkeypatch):
     assert calls["kwargs"]["max_tokens"] == 5
 
 
-def test_anthropic_api_errors_propagate(monkeypatch):
+def test_anthropic_large_budget_uses_streaming(monkeypatch):
+    """32000 tokens must not call messages.create. The SDK rejects that path."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    calls: dict[str, Any] = {}
+
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def get_final_message(self):
+            return SimpleNamespace(
+                content=[SimpleNamespace(text='{"ok": true}')],
+                stop_reason="end_turn",
+                usage=SimpleNamespace(input_tokens=3, output_tokens=4, reasoning_tokens=None),
+            )
 
     class FakeMessages:
         def create(self, **kwargs):
+            raise AssertionError("non-streaming messages.create was called")
+
+        def stream(self, **kwargs):
+            calls["kwargs"] = kwargs
+            return FakeStream()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.messages = FakeMessages()
+
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+    provider = llm.AnthropicProvider(model="claude-sonnet-4-6")
+    assert provider.complete_json(user="bill", max_tokens=32000) == {"ok": True}
+    assert calls["kwargs"]["max_tokens"] == 32000
+    assert "create" not in calls
+
+
+def test_provider_value_error_is_not_unparseable_output(client, monkeypatch):
+    monkeypatch.setattr(config, "COMPARISON_PROVIDER", "")
+
+    class Boom(llm.LLMProvider):
+        provider_id = "boom"
+        model = "boom"
+
+        def complete(self, *, user: str, system: str | None = None, max_tokens: int | None = None, data_blocks: Any = None) -> str:
+            del user, system, max_tokens, data_blocks
+            raise ValueError(
+                "Streaming is required for operations that may take longer than 10 minutes"
+            )
+
+    monkeypatch.setattr(llm, "get_provider", lambda role="primary": Boom())
+    response = client.post("/api/analyze", data={"text": "Section 1. " * 20})
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert "Streaming is required" in detail
+    assert "unparseable" not in detail.lower()
+
+
+def test_anthropic_api_errors_propagate(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    class FakeStream:
+        def __enter__(self):
             raise RuntimeError("upstream down")
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            raise AssertionError("non-streaming messages.create was called")
+
+        def stream(self, **kwargs):
+            return FakeStream()
 
     class FakeClient:
         def __init__(self, api_key):
@@ -301,7 +387,7 @@ def test_analyze_bill_uses_primary_prompt_and_parses_fenced_json():
     assert call["system"] == summarizer.SYSTEM_PROMPT
     assert call["user"].startswith(summarizer.ANALYSIS_PROMPT)
     assert "A bill about farms." in call["user"]
-    assert call["max_tokens"] == 8000
+    assert call["max_tokens"] == config.LLM_MAX_TOKENS
 
 
 def test_analyze_bill_empty_does_not_call_provider():
@@ -538,15 +624,22 @@ def client():
 
 def test_health_reports_configured_credential(client, monkeypatch):
     monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(config, "COMPARISON_PROVIDER", "")
+    monkeypatch.setattr(config, "COMPARISON_MODEL", "")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert client.get("/api/health").json() == {
         "status": "ok",
         "api_key_configured": False,
+        "comparison_configured": False,
+        "comparison_provider": "",
+        "comparison_model": "",
+        "comparison_key_configured": False,
     }
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     body = client.get("/api/health").json()
     assert body["status"] == "ok"
     assert body["api_key_configured"] is True
+    assert "sk-test" not in json.dumps(body)
 
 
 def test_analyze_missing_key_is_explicit_500(client, monkeypatch):
