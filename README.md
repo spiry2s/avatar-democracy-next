@@ -109,17 +109,17 @@ Only the hosts in `OFFICIAL_BILL_HOSTS` (`backend/bill_fetch.py`) are fetched. T
 
 | Publisher | Hosts |
 | --- | --- |
-| Sejm | `api.sejm.gov.pl`, `www.sejm.gov.pl`, `orka.sejm.gov.pl` |
+| Sejm | `sejm.gov.pl`, `api.sejm.gov.pl`, `www.sejm.gov.pl`, `orka.sejm.gov.pl` |
 | ISAP | `isap.sejm.gov.pl` |
-| Stortinget | `www.stortinget.no`, `data.stortinget.no` |
-| Lovdata | `lovdata.no` |
-| Congress | `www.congress.gov`, `api.congress.gov` |
+| Stortinget | `stortinget.no`, `www.stortinget.no`, `data.stortinget.no` |
+| Lovdata | `lovdata.no`, `www.lovdata.no` |
+| Congress | `congress.gov`, `www.congress.gov`, `api.congress.gov` |
 
-`www.lovdata.no`, `congress.gov`, `sejm.gov.pl`, and `stortinget.no` are not in that set. Add the exact hostname if you want one of them.
+A pasted link is trimmed. If it has no scheme, `https://` is added. `http://` is still rejected. One trailing dot on the host is removed, so `www.congress.gov.` is the same host as `www.congress.gov`. A second trailing dot is rejected. The host is converted with IDNA and then has to match the table exactly, so a Cyrillic or other look-alike host does not match. Letters such as ł, ó, ø, and å in the path or the query are kept and sent as UTF-8 percent-encoding. The fragment is not sent. A percent-encoded hostname, userinfo, any port other than 443, and an IP address are rejected.
 
-The fetch is https on port 443 only. Userinfo, any other port, a trailing dot, a percent-encoded hostname, an IP address, and a non-ASCII character anywhere in the URL are rejected. Percent-encode a path or a query that needs a character outside ASCII. DNS is resolved in this process. Private, loopback, link-local, multicast, reserved, and IPv4-mapped IPv6 addresses are not connected to. The socket is opened to the address that passed that check, with the TLS name and the `Host` header set to the official hostname, so a DNS change between the check and the connect does not retarget the request. Redirects are followed by the app, at most three, and every hop is checked again. A redirect off the list is rejected. `HTTP_PROXY`, `HTTPS_PROXY`, and the other proxy variables are not used.
+DNS is resolved in this process. Private, loopback, link-local, multicast, reserved, and IPv4-mapped IPv6 addresses are not connected to. The socket is opened to the address that passed that check, with the TLS name and the `Host` header set to the official hostname, so a DNS change between the check and the connect does not retarget the request. Redirects are followed by the app, at most three, and every hop is normalised and checked again. A redirect off the list is rejected. `HTTP_PROXY`, `HTTPS_PROXY`, and the other proxy variables are not used. A DNS lookup that does not return within the budget is abandoned and does not open a socket; the resolver thread itself cannot be cancelled.
 
-The download stops at about 15 MB while the body is being read, not only when `Content-Length` says so. The connect and the read share a budget of about 10 seconds. HTML, PDF, and plain text are accepted. Anything else is rejected. HTML is reduced to text: scripts, styles, and navigation are dropped, and the page renders that text as text. PDFs are read with pypdf (`pypdf` in `requirements.txt`), with a page cap and a character cap. A PDF whose text is empty or only a few characters is reported as having no text layer; upload a text file instead.
+The download stops at about 15 MB while the body is being read, not only when `Content-Length` says so. The connect and the read share a budget of about 10 seconds. HTML, PDF, and plain text are accepted. Anything else is rejected. `gzip`, `deflate`, and brotli (`br`, via the `brotli` package) are decoded under that same 15 MB cap on the decoded bytes. HTML is reduced to text: scripts, styles, and navigation are dropped, and the page renders that text as text. PDFs are read with pypdf (`pypdf` in `requirements.txt`), with a page cap and a character cap. A PDF whose text is empty or only a few characters is reported as having no text layer; upload a text file instead. HTML parsing time is not part of the 10 second socket budget.
 
 The `url` field is on `POST /api/analyze`, which already spends a model call. On a non-loopback bind it requires `X-Access-Token`, the Host and Origin checks, `multipart/form-data`, and the shared spending-route rate limit. Loopback does not require the token. The same Host and Origin checks still apply.
 

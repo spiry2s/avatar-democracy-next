@@ -31,13 +31,17 @@ BILL_TEXT = (
 )
 
 EXPECTED_HOSTS = frozenset({
+    "sejm.gov.pl",
     "api.sejm.gov.pl",
     "www.sejm.gov.pl",
     "orka.sejm.gov.pl",
     "isap.sejm.gov.pl",
+    "stortinget.no",
     "www.stortinget.no",
     "data.stortinget.no",
     "lovdata.no",
+    "www.lovdata.no",
+    "congress.gov",
     "www.congress.gov",
     "api.congress.gov",
 })
@@ -56,15 +60,27 @@ ACCEPTED = [
     ("https://www.congress.gov:443/bill/118", "www.congress.gov", "/bill/118"),
     ("https://www.congress.gov/bill#@evil.example", "www.congress.gov", "/bill"),
     ("https://www.congress.gov/search?q=a@b", "www.congress.gov", "/search?q=a@b"),
+    ("https://sejm.gov.pl/eli", "sejm.gov.pl", "/eli"),
+    ("https://stortinget.no/no", "stortinget.no", "/no"),
+    ("https://www.lovdata.no/dokument", "www.lovdata.no", "/dokument"),
+    ("https://congress.gov/bill", "congress.gov", "/bill"),
+    ("https://www.congress.gov./bill", "www.congress.gov", "/bill"),
+    ("https://WWW.CONGRESS.GOV./bill", "www.congress.gov", "/bill"),
+    ("www.congress.gov/bill/118", "www.congress.gov", "/bill/118"),
+    ("  congress.gov/bill ", "congress.gov", "/bill"),
+    ("  https://www.congress.gov/bill  ", "www.congress.gov", "/bill"),
+    ("//www.congress.gov/bill", "www.congress.gov", "/bill"),
+    ("https://sejm.gov.pl/posłowie?q=łódź", "sejm.gov.pl", "/pos%C5%82owie?q=%C5%82%C3%B3d%C5%BA"),
+    ("https://lovdata.no/sok/ønske?år=2024", "lovdata.no", "/sok/%C3%B8nske?%C3%A5r=2024"),
+    ("https://www.congress.gov/bill#łódź", "www.congress.gov", "/bill"),
+    ("https://" + "".join(chr(ord(ch) + 0xFEE0) if "!" <= ch <= "~" else ch for ch in "www.congress.gov") + "/bill", "www.congress.gov", "/bill"),
+    ("https://www\u3002congress\u3002gov/bill", "www.congress.gov", "/bill"),
 ]
 
 # Each of these must fail before DNS. They are the allowlist bypasses.
 REJECTED = [
     "https://example.com/bill",
-    "https://sejm.gov.pl/eli",
-    "https://www.lovdata.no/dokument",
-    "https://congress.gov/bill",
-    "https://stortinget.no/no",
+    "evil.example/bill",
     "https://evil.www.congress.gov/bill",
     "https://www.congress.gov.evil.example/bill",
     "https://api.sejm.gov.pl.evil.example/eli",
@@ -81,8 +97,6 @@ REJECTED = [
     "https://evil.example\\@www.congress.gov/bill",
     "https://www.congress.gov\\evil.example/bill",
     "https:\\\\www.congress.gov\\bill",
-    "https://www.congress.gov./bill",
-    "https://WWW.CONGRESS.GOV./bill",
     "https://www.congress.gov../bill",
     "https://evil.example./",
     "https://www.congress.gov%2eevil.example/",
@@ -93,8 +107,7 @@ REJECTED = [
     "https://www.xn--cngress-8of.gov/bill",
     "https://xn--sejm-xxx.gov.pl/",
     "https://www.c\u03bfngress.gov/bill",
-    "https://" + "".join(chr(ord(ch) + 0xFEE0) if "!" <= ch <= "~" else ch for ch in "www.congress.gov") + "/bill",
-    "https://www\u3002congress\u3002gov/bill",
+    "https://www.\u0441\u043engress.gov/bill",
     "https://www.congress.gov\u200b/bill",
     "https://[::1]/",
     "https://[::1]:443/",
@@ -504,7 +517,6 @@ def test_redirect_off_the_allowlist_is_not_followed(monkeypatch):
     "http://www.congress.gov/next",
     "https://user:pass@www.congress.gov/next",
     "https://www.congress.gov:444/next",
-    "https://www.congress.gov./next",
     "https://www.congress.gov.evil.example/next",
     "https://127.0.0.1/next",
     "https://169.254.169.254/latest",
@@ -571,6 +583,21 @@ def test_relative_redirect_stays_on_the_official_host(monkeypatch):
     bill_fetch.fetch_official_document("https://lovdata.no/dokument/a")
     assert [call[0] for call in script.calls] == ["lovdata.no", "lovdata.no"]
     assert script.conns[1].requested[1] == "/next-bill"
+
+
+def test_redirect_hop_uses_the_same_normalisation(monkeypatch):
+    _dns(monkeypatch)
+    dotted = Scripted([_redirect("https://www.congress.gov./next"), _plain()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", dotted)
+    bill_fetch.fetch_official_document("https://congress.gov/start")
+    assert [call[0] for call in dotted.calls] == ["congress.gov", "www.congress.gov"]
+    assert dotted.conns[1].requested[1] == "/next"
+
+    letters = Scripted([_redirect("https://sejm.gov.pl/posłowie?q=łódź"), _plain()])
+    monkeypatch.setattr(bill_fetch, "_new_connection", letters)
+    bill_fetch.fetch_official_document("https://www.sejm.gov.pl/start")
+    assert letters.calls[1][0] == "sejm.gov.pl"
+    assert letters.conns[1].requested[1] == "/pos%C5%82owie?q=%C5%82%C3%B3d%C5%BA"
 
 
 # ── limits ────────────────────────────────────────────────────────────────────
@@ -715,6 +742,35 @@ def test_gzip_is_decoded_and_a_bomb_is_capped(monkeypatch):
     monkeypatch.setattr(bill_fetch, "_new_connection", script)
     with pytest.raises(bill_fetch.BillSourceError) as exc:
         bill_fetch.fetch_official_document("https://api.sejm.gov.pl/eli/acts")
+    assert exc.value.status_code == 413
+
+
+def test_brotli_is_decoded_and_a_bomb_is_capped(monkeypatch):
+    import brotli
+
+    monkeypatch.setattr(bill_fetch, "MAX_DOWNLOAD_BYTES", 1000)
+    _dns(monkeypatch)
+    plain = BILL_TEXT.encode()
+    assert len(plain) < 1000
+    encoded = brotli.compress(plain)
+    script = Scripted([(
+        200,
+        [("Content-Type", "text/plain"), ("Content-Encoding", "br")],
+        [encoded],
+    )])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    document = bill_fetch.fetch_official_document("https://www.lovdata.no/dokument")
+    assert document.body == plain
+
+    bomb = brotli.compress(b"A" * 5000)
+    script = Scripted([(
+        200,
+        [("Content-Type", "text/plain"), ("Content-Encoding", "br"), ("Content-Length", str(len(bomb)))],
+        [bomb],
+    )])
+    monkeypatch.setattr(bill_fetch, "_new_connection", script)
+    with pytest.raises(bill_fetch.BillSourceError) as exc:
+        bill_fetch.fetch_official_document("https://www.lovdata.no/dokument")
     assert exc.value.status_code == 413
 
 

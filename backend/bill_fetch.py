@@ -8,12 +8,16 @@ operator-facing version of that.
 
 SSRF controls, in order, for the original URL and for every redirect:
 
-- https only, no userinfo, no port other than 443
-- hostname is ASCII letters, digits, and hyphens; a trailing dot, a
-  percent-encoded host, an IP literal, or a non-ASCII name is rejected
-- the hostname is compared with ``OFFICIAL_BILL_HOSTS`` and must also be
-  the literal start of the URL, so an ``@`` or a parser quirk cannot swap
-  the authority
+- https only (a missing scheme is read as https), no userinfo, no port
+  other than 443
+- the host is converted with IDNA and one trailing dot is removed, then
+  compared with ``OFFICIAL_BILL_HOSTS``. A homograph encodes to a different
+  name and does not match. A percent-encoded host and an IP literal do not
+  match either
+- non-ASCII characters in the path and query are percent-encoded. The
+  fragment is not sent
+- the authority written in an all-ASCII URL must still be that host, so an
+  ``@`` or a parser quirk cannot swap it
 - DNS is resolved by this process; private, loopback, link-local,
   multicast, reserved, and IPv4-mapped IPv6 addresses are discarded
 - the TCP connection goes to that validated IP (the TLS name and the Host
@@ -30,9 +34,10 @@ import socket
 import ssl
 import threading
 import time
+import unicodedata
 import zlib
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 from collections.abc import Iterable
 
 import http.client
@@ -47,28 +52,32 @@ class BillSourceError(Exception):
         self.status_code = status_code
 
 
-# Official bill sources. The host must match one of these strings exactly
-# after the normalisations in parse_official_url (lowercase, no port, no
-# trailing dot). A name that is not listed here is not fetched, even when
-# it is a subdomain or a look-alike of a listed name.
+# Official bill sources. The host must match one of these ASCII strings
+# exactly after parse_official_url normalises it: trim, default scheme,
+# lowercase, IDNA, and one trailing dot removed. A subdomain or a
+# look-alike that encodes to a different name is not fetched.
 #
-#   Sejm        api.sejm.gov.pl, www.sejm.gov.pl, orka.sejm.gov.pl
+#   Sejm        sejm.gov.pl, api.sejm.gov.pl, www.sejm.gov.pl, orka.sejm.gov.pl
 #   ISAP        isap.sejm.gov.pl
-#   Stortinget  www.stortinget.no, data.stortinget.no
-#   Lovdata     lovdata.no
-#   Congress    www.congress.gov, api.congress.gov
+#   Stortinget  stortinget.no, www.stortinget.no, data.stortinget.no
+#   Lovdata     lovdata.no, www.lovdata.no
+#   Congress    congress.gov, www.congress.gov, api.congress.gov
 #
 # To add a source: put the exact https hostname in this set. Do not add a
 # pattern, a suffix, or an IP address. Then add that hostname to the
 # acceptance test. There is intentionally no ALLOWED_BILL_HOSTS env var.
 OFFICIAL_BILL_HOSTS: frozenset[str] = frozenset({
+    "sejm.gov.pl",
     "api.sejm.gov.pl",
     "www.sejm.gov.pl",
     "orka.sejm.gov.pl",
     "isap.sejm.gov.pl",
+    "stortinget.no",
     "www.stortinget.no",
     "data.stortinget.no",
     "lovdata.no",
+    "www.lovdata.no",
+    "congress.gov",
     "www.congress.gov",
     "api.congress.gov",
 })
@@ -94,7 +103,7 @@ _KINDS = {
 _REQUEST_HEADERS = {
     "User-Agent": "AvatarDemocracyBillFetch/0.1",
     "Accept": "text/html, application/xhtml+xml, application/pdf, text/plain;q=0.8",
-    "Accept-Encoding": "identity",
+    "Accept-Encoding": "gzip, deflate, br, identity",
     "Connection": "close",
 }
 
@@ -182,25 +191,26 @@ class _Hop:
 def parse_official_url(url: str) -> OfficialUrl:
     """Return the official host and request-target, or raise BillSourceError.
 
-    The check is exact. A trailing dot, a different port, userinfo, a
-    look-alike name, an IP literal, or any non-https scheme fails closed.
+    Surrounding whitespace is removed. A missing scheme is read as https.
+    The host is IDNA-encoded and one trailing dot is removed, then matched
+    exactly. Non-ASCII in the path and query is percent-encoded. The
+    fragment is not fetched. A different port, userinfo, a look-alike host,
+    or an IP literal still fails closed.
     """
     if not isinstance(url, str):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
-    stripped = url.strip()
-    if not stripped or len(stripped) > MAX_URL_CHARS:
-        raise BillSourceError(MSG_UNSUPPORTED, 400)
-    if any(ch not in _URL_CHARS for ch in stripped):
+    prepared = _prepare_url(url)
+    if not _url_text_ok(prepared):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
     try:
-        parts = urlsplit(stripped)
+        parts = urlsplit(prepared)
     except ValueError as exc:
         raise BillSourceError(MSG_UNSUPPORTED, 400) from exc
     if parts.scheme != "https":
         raise BillSourceError(MSG_UNSUPPORTED, 400)
     if parts.username is not None or parts.password is not None:
         raise BillSourceError(MSG_UNSUPPORTED, 400)
-    host, port_token = _split_authority(parts.netloc)
+    raw_host, port_token = _split_authority(parts.netloc)
     if port_token not in (None, "443"):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
     try:
@@ -209,21 +219,17 @@ def parse_official_url(url: str) -> OfficialUrl:
         raise BillSourceError(MSG_UNSUPPORTED, 400) from exc
     if parsed_port not in (None, 443):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
-    parsed_host = parts.hostname
-    if parsed_host is None or parsed_host != host:
+    if parts.hostname is None or parts.hostname != raw_host:
         raise BillSourceError(MSG_UNSUPPORTED, 400)
+    host = _normalize_host(raw_host)
     if not _is_plain_hostname(host) or _is_ip_literal(host):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
     if host not in OFFICIAL_BILL_HOSTS:
         raise BillSourceError(MSG_UNSUPPORTED, 400)
-    _require_literal_authority(stripped, host)
-    path = parts.path or "/"
-    if not path.startswith("/") or any(ch in path for ch in "\\\r\n "):
-        raise BillSourceError(MSG_UNSUPPORTED, 400)
-    query = parts.query
-    if any(ch in query for ch in "\\\r\n "):
-        raise BillSourceError(MSG_UNSUPPORTED, 400)
-    target = path if not query else f"{path}?{query}"
+    _require_literal_authority(prepared, host)
+    # Encode the fragment as well, then drop it. It is not part of the request.
+    _percent_encode_non_ascii(parts.fragment)
+    target = _request_target(parts.path, parts.query)
     return OfficialUrl(host=host, target=target)
 
 
@@ -412,6 +418,9 @@ def _decode_body(body: bytes, encodings: Iterable[str]) -> bytes:
         if token == "deflate":
             body = _inflate_limited(body)
             continue
+        if token == "br":
+            body = _brotli_limited(body)
+            continue
         raise BillSourceError(MSG_TYPE, 400)
     return body
 
@@ -474,6 +483,92 @@ def _resolve_ips(host: str, deadline: float) -> list[str]:
     return ips
 
 
+def _prepare_url(url: str) -> str:
+    """Trim the paste and supply https when the scheme was left off."""
+    text = url.strip()
+    if not text or len(text) > MAX_URL_CHARS:
+        raise BillSourceError(MSG_UNSUPPORTED, 400)
+    if text.startswith("//"):
+        text = "https:" + text
+    elif "://" not in text:
+        text = "https://" + text
+    if len(text) > MAX_URL_CHARS:
+        raise BillSourceError(MSG_UNSUPPORTED, 400)
+    return text
+
+
+def _url_text_ok(text: str) -> bool:
+    """Allow URL characters and letters such as ł, ó, ø, and å.
+
+    ASCII controls, spaces, backslashes, and Unicode control or separator
+    characters are rejected. A format character such as U+200B must not be
+    stripped into an allowlisted name by IDNA.
+    """
+    for ch in text:
+        if ch in _URL_CHARS:
+            continue
+        if ord(ch) < 128:
+            return False
+        if unicodedata.category(ch)[0] in {"C", "Z"}:
+            return False
+    return True
+
+
+def _normalize_host(raw: str) -> str:
+    """IDNA-encode the host, then remove one trailing dot."""
+    try:
+        encoded = raw.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise BillSourceError(MSG_UNSUPPORTED, 400) from exc
+    if encoded.endswith("."):
+        encoded = encoded[:-1]
+    return encoded
+
+
+def _percent_encode_non_ascii(text: str) -> str:
+    """UTF-8 percent-encode characters outside ASCII. Leave the rest as written."""
+    if text.isascii():
+        return text
+    return "".join(ch if ord(ch) < 128 else quote(ch, safe="") for ch in text)
+
+
+def _request_target(path: str, query: str) -> str:
+    path = _percent_encode_non_ascii(path or "/")
+    query = _percent_encode_non_ascii(query)
+    if not path.startswith("/") or any(ch in path for ch in "\\\r\n "):
+        raise BillSourceError(MSG_UNSUPPORTED, 400)
+    if any(ch in query for ch in "\\\r\n "):
+        raise BillSourceError(MSG_UNSUPPORTED, 400)
+    return path if not query else f"{path}?{query}"
+
+
+def _brotli_limited(data: bytes) -> bytes:
+    """Decode brotli and stop if the decoded bytes pass the download cap."""
+    try:
+        import brotli
+    except ImportError as exc:
+        raise BillSourceError(MSG_TYPE, 400) from exc
+    decoder = brotli.Decompressor()
+    out = bytearray()
+    view = memoryview(data)
+    try:
+        spans = range(0, len(view), _READ_CHUNK) if len(view) else (0,)
+        for start in spans:
+            chunk = view[start:start + _READ_CHUNK] if len(view) else b""
+            piece = decoder.process(chunk)
+            if len(out) + len(piece) > MAX_DOWNLOAD_BYTES:
+                raise BillSourceError(MSG_TOO_BIG, 413)
+            out += piece
+        if not decoder.is_finished():
+            piece = decoder.process(b"")
+            if len(out) + len(piece) > MAX_DOWNLOAD_BYTES:
+                raise BillSourceError(MSG_TOO_BIG, 413)
+            out += piece
+    except brotli.error as exc:
+        raise BillSourceError(MSG_UNSAFE, 400) from exc
+    return bytes(out)
+
+
 def _split_authority(netloc: str) -> tuple[str, str | None]:
     if not netloc or any(ch in netloc for ch in "@\\\t\r\n "):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
@@ -527,16 +622,25 @@ def _is_numeric_label(label: str) -> bool:
 
 
 def _require_literal_authority(url: str, host: str) -> None:
-    """The allowlisted host must be the authority written in the URL."""
+    """An all-ASCII URL must literally name the allowlisted host.
+
+    A non-ASCII host is checked after IDNA instead, because the raw text
+    will not contain the ASCII name. One trailing dot is allowed here; the
+    matcher has already removed it.
+    """
+    if any(ord(ch) > 127 for ch in url):
+        return
     lowered = url.strip().lower()
     prefix = "https://" + host
     if not lowered.startswith(prefix):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
     rest = lowered[len(prefix):]
-    if not rest:
+    if not rest or rest[0] in "/?#":
         return
-    if rest[0] in "/?#":
-        return
+    if rest[0] == ".":
+        rest = rest[1:]
+        if not rest or rest[0] in "/?#":
+            return
     if rest.startswith(":443"):
         after = rest[4:]
         if not after or after[0] in "/?#":
@@ -548,11 +652,7 @@ def _next_url(current: OfficialUrl, location: str) -> str:
     if not isinstance(location, str):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
     location = location.strip()
-    if (
-        not location
-        or len(location) > MAX_URL_CHARS
-        or any(ord(ch) < 32 or ord(ch) == 127 or ord(ch) > 126 or ch == "\\" for ch in location)
-    ):
+    if not location or len(location) > MAX_URL_CHARS or not _url_text_ok(location):
         raise BillSourceError(MSG_UNSUPPORTED, 400)
     base = f"https://{current.host}{current.target}"
     return urljoin(base, location)
