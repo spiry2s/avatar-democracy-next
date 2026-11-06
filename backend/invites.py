@@ -793,6 +793,24 @@ def authenticate_cookie(request: Any) -> Invite | None:
     return authenticate(values[0])
 
 
+# Exact public files for the landing page. Not a directory mount.
+PUBLIC_LANDING_ASSETS = frozenset({
+    "/landing/style.css",
+    "/landing/illustration.js",
+    "/landing/favicon.svg",
+})
+_BLOCKED_STATIC_SUFFIXES = (
+    ".html",
+    ".htm",
+    ".md",
+    ".markdown",
+    ".py",
+    ".env",
+    ".sqlite",
+    ".jsonl",
+)
+
+
 def _static_path(path: str) -> bool:
     if path in {"/manifest.webmanifest", "/sw.js"}:
         return True
@@ -800,11 +818,20 @@ def _static_path(path: str) -> bool:
         return False
     if ".." in path or "\\" in path or "\x00" in path:
         return False
+    lowered = path.lower()
+    if lowered.endswith(_BLOCKED_STATIC_SUFFIXES):
+        return False
     return True
 
 
 def request_is_exempt(method: str, path: str) -> bool:
-    """Static shell and the token landing do not require a cookie."""
+    """Static shell, the public landing, and the token landing do not require a cookie.
+
+    ``/`` is exempt so the route can show the public page or the prototype.
+    Analyzer HTML under ``/static/`` is not exempt.
+    """
+    if method in {"GET", "HEAD"} and path in PUBLIC_LANDING_ASSETS:
+        return True
     if _static_path(path):
         return True
     if method in {"GET", "HEAD"} and path in {"/", "/invite"}:
@@ -812,12 +839,23 @@ def request_is_exempt(method: str, path: str) -> bool:
     return False
 
 
+def _denial_html() -> str:
+    """Public landing, or the short closed page if that file is missing."""
+    landing = PROJECT_ROOT / "landing" / "index.html"
+    try:
+        if landing.is_file():
+            return landing.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return DENIED_HTML
+
+
 def denied_page():
-    """Same HTML for a missing, unknown, expired, or revoked invite."""
+    """Same HTML for a presented invite that does not match. No reason is included."""
     from starlette.responses import HTMLResponse
 
     return HTMLResponse(
-        DENIED_HTML,
+        _denial_html(),
         status_code=403,
         headers={
             "Cache-Control": "no-store",

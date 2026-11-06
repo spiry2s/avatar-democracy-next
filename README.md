@@ -16,7 +16,7 @@ The one-page project site is [docs/site](docs/site/README.md). It is static HTML
 
 | Page | What it does |
 | --- | --- |
-| `/` | Landing page |
+| `/` | Prototype home. With invite mode on and no valid invite, this URL is the public landing page instead |
 | `/analyze` | Bill summary and red-flag analysis from pasted text, an official bill link, or a PDF |
 | `/avatar` | Compass questionnaire, values statement, per-issue delegates, recorded positions |
 | `/vote` | Analyze a bill, then cast the Avatar's per-section vote. Overrides update the page and the audit log |
@@ -114,7 +114,9 @@ AVATAR_INVITE_MODE=1 python main.py
 
 `create` prints a link like `http://127.0.0.1:8000/?token=...` once. The token is `secrets.token_urlsafe(32)` (32 bytes from the operating system). The server stores only an HMAC-SHA256 of it, plus a label, `created_at`, `expires_at`, a revoked flag, budgets, and usage counters. The store is `invites.sqlite` under `AVATAR_INVITE_DATA_DIR` (default `data/`, gitignored), next to `invite-hmac.key`. A path that contains `..`, or a relative path that resolves outside the project through a symlink, is rejected.
 
-Opening the link sets an `HttpOnly` cookie named `avatar_invite`, `SameSite=Strict`, and `Secure` when the request is https. The response is a redirect to the same path without `token`, so the secret is not left in the address bar. A missing, unknown, expired, or revoked token gets the same 403 page, with no reason. Static files under `/static/`, the manifest, and `sw.js` load without the cookie. Every other page and every `/api` route requires it. `python -m backend.invites` is the only admin interface. It is not mounted on the app. There is no invite route that creates, lists, or revokes tokens.
+Opening the link sets an `HttpOnly` cookie named `avatar_invite`, `SameSite=Strict`, and `Secure` when the request is https. A valid token redirects to the same path without `token`, and that next page is the prototype. With invite mode on, `GET /` with no cookie is the public landing page in `landing/`. It does not open the prototype. A presented token that does not match is refused with the same page and no reason: the prototype is not served and the cookie is not set. `/landing/style.css`, `/landing/illustration.js`, and `/landing/favicon.svg` load without a cookie. Static files under `/static/` other than HTML, the manifest, and `sw.js` load without the cookie. Every other page and every `/api` route requires a valid invite. A LAN access token does not take the place of an invite. `python -m backend.invites` is the only admin interface. It is not mounted on the app. There is no invite route that creates, lists, or revokes tokens.
+
+With invite mode on, the compass, values, delegates, and the audit log of those actions are stored per invite under the invite data directory (`profiles/` and `audits/`). They are not written to the shared `data/profile.json`. With invite mode off, the prototype still uses that one local profile. Bill drafts stay in the shared bill store either way.
 
 ```bash
 python -m backend.invites list
@@ -372,8 +374,13 @@ avatar-democracy/
 │       ├── icon-192.png
 │       ├── icon-512.png
 │       └── icon-maskable-512.png
+├── landing/                     # Public page for / when invite mode is on and there is no valid invite
+│   ├── index.html
+│   ├── style.css
+│   ├── illustration.js
+│   └── favicon.svg
 ├── docs/
-│   └── site/                    # Static project page, not the local app. See docs/site/README.md
+│   └── site/                    # Separate static project page. See docs/site/README.md
 ├── tests/
 │   ├── test_bills.py
 │   ├── test_chamber.py

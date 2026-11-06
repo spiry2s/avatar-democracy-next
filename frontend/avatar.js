@@ -28,9 +28,23 @@ async function init() {
     valuesInput.value = profile.values || '';
   }
 
+  renderLegend();
   renderQuestionnaire();
-  if (profile && profile.compass) renderCompass(profile.compass);
+  if (profile && profile.compass && Object.keys(profile.compass).length) {
+    renderCompass(profile.compass, true);
+  }
   renderDelegates();
+}
+
+function renderLegend() {
+  const legend = document.getElementById("axis-legend");
+  if (!legend || !questionnaire) return;
+  const axes = questionnaire.axes || {};
+  legend.innerHTML = `<dl class="axis-legend">${Object.entries(axes).map(([axis, labels]) => `
+    <div>
+      <dt>${escHtml(axis)}</dt>
+      <dd>${escHtml(labels.neg)} <span aria-hidden="true">·</span> ${escHtml(labels.pos)}</dd>
+    </div>`).join("")}</dl>`;
 }
 
 function renderQuestionnaire() {
@@ -58,20 +72,29 @@ function renderQuestionnaire() {
   });
 }
 
-function renderCompass(compass) {
-  const axes = questionnaire.axes;
-  compassReadout.innerHTML = Object.entries(compass).map(([axis, val]) => {
-    const a = axes[axis] || { neg: 'low', pos: 'high' };
-    const pct = ((val + 1) / 2) * 100;  // -1..1 -> 0..100
+function renderCompass(compass, saved) {
+  const axes = questionnaire.axes || {};
+  const order = Object.keys(axes);
+  compassReadout.innerHTML = order.map((axis) => {
+    const a = axes[axis] || { neg: "low", pos: "high" };
+    const raw = compass && typeof compass[axis] === "number" ? compass[axis] : 0;
+    const pct = ((raw + 1) / 2) * 100;
     return `<div class="axis-row">
       <span class="axis-neg">${escHtml(a.neg)}</span>
       <div class="axis-track"><div class="axis-fill" style="left:${pct}%"></div></div>
       <span class="axis-pos">${escHtml(a.pos)}</span>
     </div>`;
-  }).join('');
-  compassReadout.classList.remove('hidden');
-  compassStatus.textContent = 'Set';
+  }).join("");
+  compassReadout.classList.remove("hidden");
+  compassStatus.textContent = saved ? "Saved" : "Not saved";
 }
+
+document.getElementById("compass-clear").addEventListener("click", () => {
+  Object.keys(answers).forEach((key) => delete answers[key]);
+  renderQuestionnaire();
+  compassStatus.textContent = "Not saved";
+  saveStatus.textContent = "Answers cleared on this page. Save to store that.";
+});
 
 // ── Save compass + values ─────────────────────────────────────────────────────
 
@@ -87,8 +110,8 @@ saveBtn.addEventListener('click', async () => {
     if (!res.ok) throw new Error((await res.json()).detail || 'Save failed');
     const data = await res.json();
     profile = data.profile;
-    renderCompass(profile.compass);
-    saveStatus.textContent = 'Saved ✓';
+    renderCompass(profile.compass, true);
+    saveStatus.textContent = "Saved. Refresh this page and the same answers come back.";
     setTimeout(() => (saveStatus.textContent = ''), 2500);
   } catch (err) {
     saveStatus.textContent = `Error: ${err.message}`;

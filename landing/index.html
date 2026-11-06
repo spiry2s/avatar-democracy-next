@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Avatar Democracy</title>
+  <meta name="description" content="A public introduction to Avatar Democracy. The working prototype on this server is a closed demo. Citizens configure, review, and override their own Avatars.">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="/landing/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/landing/style.css">
+</head>
+<body id="public-landing">
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="mast">
+    <div class="wrap">
+      <p class="brand">Avatar Democracy</p>
+      <nav aria-label="On this page">
+        <ul>
+          <li><a href="#how">How it works</a></li>
+          <li><a href="#example">Example</a></li>
+          <li><a href="#control">Citizen control</a></li>
+          <li><a href="#today">Today</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="content">
+    <div class="wrap">
+      <div class="hero">
+        <div>
+          <p class="kicker">Open source · early prototype</p>
+          <h1>Bringing direct democracy into the 21st century</h1>
+          <p class="lede">Citizens configure a personal Avatar, review what it reads, and override any position it would record. This demo is closed. Without an invite, this page is the only part you can open.</p>
+          <ul class="actions">
+            <li><a class="primary" href="https://github.com/spiry2s/avatar-democracy/blob/main/ai_avatar_democracy_v1.1.md">Read the white paper</a></li>
+            <li><a href="https://github.com/spiry2s/avatar-democracy">See the code</a></li>
+            <li><a href="/invite">Continue to the demo</a></li>
+          </ul>
+        </div>
+        <figure class="diagram">
+          <div class="diagram-grid" aria-hidden="true">
+            <div class="cell"><span>Citizen</span><span class="bars"><i></i><i></i><i></i></span></div>
+            <div class="cell"><span>Citizen</span><span class="bars"><i></i><i></i><i></i></span></div>
+            <div class="cell"><span>Citizen</span><span class="bars"><i></i><i></i><i></i></span></div>
+            <div class="cell you">
+              <div>
+                <strong>You</strong>
+                <span>Your Avatar</span>
+                <span class="bars"><i></i><i></i><i></i></span>
+              </div>
+              <div class="pills">
+                <b>Configure</b>
+                <b>Review</b>
+                <b>Override</b>
+              </div>
+            </div>
+          </div>
+          <figcaption>A diagram of the idea: one Avatar for each citizen, controlled by that citizen. It is not a count of participants and not a legislature.</figcaption>
+        </figure>
+      </div>
+
+      <section id="how">
+        <p class="section-kicker">How it works</p>
+        <h2>Read, configure, then decide</h2>
+        <ol class="steps">
+          <li>
+            <span>01</span>
+            <div>
+              <h3>Read a bill</h3>
+              <p>The bill analyzer takes pasted text, a link from a supported official publisher, or a PDF. You get a plain-language summary and a section-by-section breakdown.</p>
+            </div>
+          </li>
+          <li>
+            <span>02</span>
+            <div>
+              <h3>Configure an Avatar</h3>
+              <p>In the closed demo, an invited person can set a coarse compass, write values, and name per-issue delegates. That setup is the instruction the Avatar follows.</p>
+            </div>
+          </li>
+          <li>
+            <span>03</span>
+            <div>
+              <h3>Review and override</h3>
+              <p>The Avatar can record a position from that configuration. The same person can change the setup or override a position. The record is there to be checked, not to stand in for the person.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section id="analyzer">
+        <h2>What the bill analyzer does today</h2>
+        <ul class="plain">
+          <li><strong>A plain-language summary</strong> and a section-by-section breakdown.</li>
+          <li><strong>A quote for grounded claims.</strong> Section summaries, red flags, and beneficiary claims are treated as grounded only when a verbatim quote appears in the bill. If it does not, the claim is marked ungrounded and kept out of the Avatar. It is not presented as a verified finding.</li>
+          <li><strong>An optional second reading from another provider.</strong> If you configure one, the same analysis runs again and the demo shows where the two readings differ. No third model picks a winner. The second reading is off unless you switch it on.</li>
+        </ul>
+      </section>
+
+      <section id="example">
+        <p class="section-kicker">Worked example</p>
+        <h2>A fictional bill, not the analyzer</h2>
+        <p class="example-banner">Fictional example. North Wharf is an invented place. This is not legislation, not the bill analyzer, and no model is called.</p>
+        <div class="example">
+          <div class="example-grid">
+            <pre class="bill" id="example-bill">AN EXAMPLE BILL
+This text is fictional. North Wharf is not a real place.
+
+1. Short title.
+This example may be called the North Wharf Lantern Act.
+
+2. Harbour lights.
+The harbour keeper shall keep the wall lanterns lit from dusk until dawn.
+
+3. Waiver.
+The harbour warden may waive that duty for any vessel the warden names, and need not publish a reason.
+
+4. Spending.
+Of the money set aside for lanterns, half shall go to a workshop on the sponsor's own quay.</pre>
+            <div>
+              <ul class="section-buttons" id="example-sections">
+                <li><button type="button" aria-pressed="true" data-quote="This example may be called the North Wharf Lantern Act." data-summary="Example reading: the text gives this fictional bill a short title.">1 · Short title</button></li>
+                <li><button type="button" aria-pressed="false" data-quote="The harbour keeper shall keep the wall lanterns lit from dusk until dawn." data-summary="Example reading: the keeper would keep the wall lanterns lit from dusk until dawn.">2 · Harbour lights</button></li>
+                <li><button type="button" aria-pressed="false" data-quote="The harbour warden may waive that duty for any vessel the warden names, and need not publish a reason." data-summary="Example reading: the warden could waive the lighting duty for a named vessel without publishing a reason." data-flag="Example flag: the waiver names no limit and no public reason." data-second="Second example reading: someone else might call the same sentence a narrow safety valve. This page does not decide which reading is right.">3 · Waiver</button></li>
+                <li><button type="button" aria-pressed="false" data-quote="half shall go to a workshop on the sponsor's own quay." data-summary="Example reading: half of the lantern money would go to a workshop on the sponsor's quay.">4 · Spending</button></li>
+                <li><button type="button" aria-pressed="false" data-quote="The Act bans every ferry from the harbour." data-summary="Example claim: the bill bans every ferry. This quote is not in the text, so the illustration withholds it.">5 · A claim to withhold</button></li>
+              </ul>
+              <button type="button" class="second-toggle" id="example-second" aria-pressed="false">Show a second example reading</button>
+              <div class="reading" id="example-reading" aria-live="polite"></div>
+              <noscript><p>The buttons need the page script to switch the example. They still do not contact a model.</p></noscript>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="control">
+        <p class="section-kicker">Citizen control</p>
+        <h2>The person stays in charge</h2>
+        <p>You choose the configuration. You can review the quote beside a claim, change delegates, leave an issue unset, or override a recorded position. The machine sits between that configuration and a demo record. It does not replace elections, representatives, or a parliament, and it does not take the place of a person's own judgment.</p>
+      </section>
+
+      <section id="avatar-demo">
+        <h2>What belongs to the Avatar demo</h2>
+        <p>The bill analyzer shows a reading. It does not cast a vote. On the separate Avatar demo, if two configured models disagree on a serious red flag, that section can be held as abstain so it adds neither a yes nor a no. That rule is not part of the general bill analyzer.</p>
+      </section>
+
+      <section id="today">
+        <div class="split">
+          <div>
+            <h2>What you can run today</h2>
+            <ul class="plain">
+              <li>A local prototype: bill reading, one Avatar, a bill path, and a synthetic chamber. Start it from the repository with <code>python main.py</code>. Model calls need your own API key.</li>
+              <li>Quote checks, optional comparison, overrides, and an audit log, as implemented in the repository.</li>
+              <li>On this server, those pages stay behind an invite. Opening this page does not sign you in. An invite link is the way in.</li>
+            </ul>
+          </div>
+          <div>
+            <h2>Research and open questions</h2>
+            <ul class="plain">
+              <li>The white paper is a working document. Its open problems are listed in the paper.</li>
+              <li>Whether any jurisdiction ever gives an Avatar tally formal weight is a separate legal choice. This page does not make that choice.</li>
+              <li>Agreement between models is not proof. The synthetic chamber is a demo population, not real voters, and not a live vote count.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="note" id="honest-note">
+        <h2>An honest note: this is an early prototype</h2>
+        <ul class="plain">
+          <li>The code runs locally (<code>python main.py</code>) and needs your own API key. The second-provider check is off unless you switch it on.</li>
+          <li>Language models can still misread legal text. A quote shows you where to look; it does not prove the summary is right. Always read the bill itself. This is not legal advice.</li>
+          <li>The Avatar, bill-lifecycle, and chamber pages are a demo. The chamber is a synthetic population, not real voters.</li>
+          <li>There are no adoption figures, endorsements, or accuracy scores on this page, because the project does not have them.</li>
+        </ul>
+      </section>
+
+      <section id="nonpartisan">
+        <h2>Nonpartisan by design</h2>
+        <p>Avatar Democracy is not affiliated with, funded by, or run for any political party, candidate, or campaign. The analyzer's prompts tell it to avoid partisan framing and are published in the code for anyone to review. Any party may use the code under the MIT license, but none speaks for the project.</p>
+      </section>
+
+      <section id="critique">
+        <h2>Help us find what is broken</h2>
+        <p>If you study democratic institutions, machine-learning bias, verification, or law, or if you run participation programmes, send critique on <a href="https://github.com/spiry2s/avatar-democracy/issues">GitHub Issues</a>. Who can see that feedback depends on who can see the repository.</p>
+      </section>
+    </div>
+  </main>
+  <footer>
+    <div class="wrap">
+      <nav aria-label="Project">
+        <ul class="colophon">
+          <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/ai_avatar_democracy_v1.1.md">White paper v1.1</a></li>
+          <li><a href="https://github.com/spiry2s/avatar-democracy">Code</a></li>
+          <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/LICENSE">MIT License</a></li>
+          <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/sample_bill.txt">Fictional sample bill</a></li>
+        </ul>
+      </nav>
+    </div>
+  </footer>
+  <script src="/landing/illustration.js"></script>
+</body>
+</html>

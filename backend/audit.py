@@ -11,13 +11,46 @@ convention: we never rewrite history.
 
 from __future__ import annotations
 
+import contextvars
 import json
+import os
+import re
 import time
 from pathlib import Path
 from typing import Any
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 AUDIT_FILE = DATA_DIR / "audit.jsonl"
+_SCOPE_ID = re.compile(r"[0-9a-f]{16}\Z")
+_scope: contextvars.ContextVar[str | None] = contextvars.ContextVar("avatar_audit_scope", default=None)
+_root: contextvars.ContextVar[Path | None] = contextvars.ContextVar("avatar_audit_root", default=None)
+
+
+def push_scope(scope: str, root: Path) -> tuple[contextvars.Token, contextvars.Token]:
+    """Write and read this request's audit file, not the shared log."""
+    if not _SCOPE_ID.fullmatch(scope):
+        raise ValueError("bad audit scope")
+    return (_scope.set(scope), _root.set(root))
+
+
+def reset_scope(token: tuple[contextvars.Token, contextvars.Token]) -> None:
+    scope_token, root_token = token
+    _scope.reset(scope_token)
+    _root.reset(root_token)
+
+
+def _audit_path() -> Path:
+    scope = _scope.get()
+    root = _root.get()
+    if scope is None or root is None:
+        return AUDIT_FILE
+    if not _SCOPE_ID.fullmatch(scope):
+        raise ValueError("bad audit scope")
+    directory = (root / "audits").resolve()
+    path = (directory / f"{scope}.jsonl").resolve()
+    if path.parent != directory:
+        raise ValueError("bad audit scope")
+    return path
 
 
 def log_event(event_type: str, details: dict[str, Any]) -> dict[str, Any]:
@@ -32,14 +65,23 @@ def log_event(event_type: str, details: dict[str, Any]) -> dict[str, Any]:
     Returns:
         The stored event record (including its timestamp).
     """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = _audit_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
     event = {
         "timestamp": time.time(),
         "event_type": event_type,
         "details": details,
     }
-    with AUDIT_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event) + "\n")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event) + "\n")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     return event
 
 
@@ -53,11 +95,12 @@ def read_events(limit: int | None = None) -> list[dict[str, Any]]:
     Returns:
         List of event records, most recent first.
     """
-    if not AUDIT_FILE.exists():
+    path = _audit_path()
+    if not path.exists():
         return []
 
     events: list[dict[str, Any]] = []
-    with AUDIT_FILE.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:

@@ -17,18 +17,23 @@ deployment would key profiles by verified eID. citizen_id defaults to "local".
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any
 
-from backend import audit
+from backend import invites
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 PROFILE_FILE = DATA_DIR / "profile.json"
+_SCOPE_ID = re.compile(r"[0-9a-f]{16}\Z")
+_scope: contextvars.ContextVar[str | None] = contextvars.ContextVar("avatar_profile_scope", default=None)
+_root: contextvars.ContextVar[Path | None] = contextvars.ContextVar("avatar_profile_root", default=None)
 
 # How long a newly-added delegate sits in cooling-off before the Avatar will
 # follow it. White paper suggests "one week or more". Override with the env var
@@ -188,12 +193,58 @@ class CitizenProfile:
 
 # ── persistence ────────────────────────────────────────────────────────────────
 
+def push_scope(scope: str, root: Path) -> tuple[contextvars.Token, contextvars.Token]:
+    """Remember which invite's profile this request may read or write.
+
+    ``scope`` is the invite id, not the raw invite. ``root`` is that invite
+    store's directory. The shared ``profile.json`` is not used while this is set.
+    """
+    if not _SCOPE_ID.fullmatch(scope):
+        raise ValueError("bad profile scope")
+    return (_scope.set(scope), _root.set(root))
+
+
+def reset_scope(token: tuple[contextvars.Token, contextvars.Token]) -> None:
+    scope_token, root_token = token
+    _scope.reset(scope_token)
+    _root.reset(root_token)
+
+
+def _profile_path() -> Path | None:
+    """File for this request.
+
+    With invite mode on and no scope, return None so a handler cannot fall
+    through to the shared local profile. With invite mode off, use that file.
+    """
+    scope = _scope.get()
+    if scope is None:
+        if invites.invite_mode_enabled():
+            return None
+        return PROFILE_FILE
+    root = _root.get()
+    if root is None or not _SCOPE_ID.fullmatch(scope):
+        return None
+    directory = (root / "profiles").resolve()
+    path = (directory / f"{scope}.json").resolve()
+    if path.parent != directory:
+        return None
+    return path
+
+
+def _tighten(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def load_profile() -> CitizenProfile | None:
     """Load the stored profile, or None if none exists yet."""
-    if not PROFILE_FILE.exists():
+    path = _profile_path()
+    if path is None or not path.exists():
         return None
     try:
-        data = json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
     return CitizenProfile.from_dict(data)
@@ -201,8 +252,17 @@ def load_profile() -> CitizenProfile | None:
 
 def save_profile(profile: CitizenProfile) -> None:
     """Persist the profile to disk."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = _profile_path()
+    if path is None:
+        raise RuntimeError("profile scope missing")
+    scope = _scope.get()
+    if scope is not None:
+        profile.citizen_id = scope
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
     profile.updated_at = time.time()
-    PROFILE_FILE.write_text(
-        json.dumps(profile.to_dict(), indent=2), encoding="utf-8"
-    )
+    path.write_text(json.dumps(profile.to_dict(), indent=2), encoding="utf-8")
+    _tighten(path)

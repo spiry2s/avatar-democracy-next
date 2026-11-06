@@ -65,6 +65,28 @@ QUESTIONS: list[dict[str, Any]] = [
 ]
 
 
+SCALE_VALUES = frozenset({-2, -1, 0, 1, 2})
+
+
+def clean_answers(raw: dict[str, Any]) -> dict[str, int]:
+    """Keep known question ids and Likert values from -2 to 2.
+
+    Unknown ids and values outside that scale are rejected. Booleans are
+    rejected so a JSON true cannot become an agreement.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("Answers must be a map of question id to a scale value.")
+    known = {q["id"] for q in QUESTIONS}
+    cleaned: dict[str, int] = {}
+    for key, value in raw.items():
+        if key not in known or isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Answers must use the questionnaire ids and values from -2 to 2.")
+        if value not in SCALE_VALUES:
+            raise ValueError("Answers must use the questionnaire ids and values from -2 to 2.")
+        cleaned[key] = value
+    return cleaned
+
+
 def public_questionnaire() -> dict[str, Any]:
     """The questionnaire as sent to the frontend (no scoring internals beyond what's needed)."""
     return {

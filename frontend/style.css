@@ -725,6 +725,20 @@ footer {
 
 /* ── Questionnaire ── */
 
+.axis-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-3);
+  margin: 0 0 var(--space-4);
+}
+.axis-legend div { margin: 0; }
+.axis-legend dt {
+  font-weight: 700;
+  text-transform: capitalize;
+}
+.axis-legend dd { margin: 0.15rem 0 0; color: var(--text-muted); }
+#compass-clear { margin-top: var(--space-4); }
+
 .q-item { padding: var(--space-4) 0; border-bottom: 1px solid var(--border); }
 .q-item:last-child { border-bottom: none; }
 .q-statement { font-size: 0.92rem; margin-bottom: 10px; }
