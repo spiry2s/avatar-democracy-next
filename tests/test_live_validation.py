@@ -700,17 +700,17 @@ def test_a_heading_between_words_is_not_collapsed_away():
 
 
 def test_fixture_files_keep_their_credits():
-    readme = (FIXTURES / "README.txt").read_text()
+    readme = (FIXTURES / "README.txt").read_text(encoding="utf-8")
     assert "NLOD 2.0" in readme
     assert "Lovdata" in readme
-    lovdata = (FIXTURES / "lovdata_helligdagsfredloven_excerpt.txt").read_text()
+    lovdata = (FIXTURES / "lovdata_helligdagsfredloven_excerpt.txt").read_text(encoding="utf-8")
     assert lovdata.startswith("Source: Lovdata (lovdata.no), NLOD 2.0\n")
-    sejm = (FIXTURES / "sejm_DU_2024_1823_excerpt.txt").read_text()
+    sejm = (FIXTURES / "sejm_DU_2024_1823_excerpt.txt").read_text(encoding="utf-8")
     assert sejm.startswith("Source: Dziennik Ustaw 2024 poz. 1823, via api.sejm.gov.pl\n")
 
 
 def test_govinfo_quotes_ground_in_the_cited_section_and_not_the_other():
-    text = (FIXTURES / "govinfo_hr7521_excerpt.txt").read_text()
+    text = (FIXTURES / "govinfo_hr7521_excerpt.txt").read_text(encoding="utf-8")
     blocks = _blocks(text)
     source = blocks[0][1]
     quotes = _quotes(blocks[1][1])
@@ -728,7 +728,7 @@ def test_govinfo_quotes_ground_in_the_cited_section_and_not_the_other():
 
 
 def test_lovdata_quotes_ground_in_the_paragraph_and_not_another():
-    text = (FIXTURES / "lovdata_helligdagsfredloven_excerpt.txt").read_text()
+    text = (FIXTURES / "lovdata_helligdagsfredloven_excerpt.txt").read_text(encoding="utf-8")
     blocks = _blocks(text)
     source = blocks[0][1]
     quotes = _quotes(blocks[1][1])
@@ -747,7 +747,7 @@ def test_lovdata_quotes_ground_in_the_paragraph_and_not_another():
 
 
 def test_polish_pdf_and_html_quotes_stay_inside_the_cited_article():
-    text = (FIXTURES / "sejm_DU_2024_1823_excerpt.txt").read_text()
+    text = (FIXTURES / "sejm_DU_2024_1823_excerpt.txt").read_text(encoding="utf-8")
     blocks = _blocks(text)
     pdf, html = blocks[0][1], blocks[1][1]
     article_one = (
@@ -914,7 +914,7 @@ _NO_SECTION_6 = (
 
 def test_wrapped_paragraph_cross_reference_does_not_split_the_section():
     """§ 6's quote contains '§§ 3 til 5'. A wrap must not open a new heading."""
-    text = (FIXTURES / "lovdata_helligdagsfredloven_excerpt.txt").read_text()
+    text = (FIXTURES / "lovdata_helligdagsfredloven_excerpt.txt").read_text(encoding="utf-8")
     source = _blocks(text)[0][1].rstrip() + (
         "\n§ 6.\nStraff\n"
         "Den som forsettlig eller uaktsomt overtrer\n"
@@ -949,7 +949,7 @@ _LOVDATA_SECTION_6 = (
 
 
 def test_lovdata_section_6_quote_survives_a_split_paragraph_sign():
-    text = (FIXTURES / "lovdata_helligdagsfredloven_excerpt.txt").read_text()
+    text = (FIXTURES / "lovdata_helligdagsfredloven_excerpt.txt").read_text(encoding="utf-8")
     source = _blocks(text)[0][1].rstrip() + "\n" + _LOVDATA_SECTION_6
     spans = grounding.bill_section_spans(source)
     keys = [span["key"] for span in spans]
@@ -984,7 +984,7 @@ _ART_6 = (
 
 
 def test_art_6_amending_sentence_skips_the_journal_citation_only():
-    text = (FIXTURES / "sejm_DU_2024_1823_excerpt.txt").read_text()
+    text = (FIXTURES / "sejm_DU_2024_1823_excerpt.txt").read_text(encoding="utf-8")
     html = _blocks(text)[1][1]
     located = _ground(_ART_6, html, "Art. 6")
     assert located["grounded"] is True, located["grounding_reason"]

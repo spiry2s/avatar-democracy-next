@@ -212,7 +212,7 @@ def _ensure_key(data_dir: Path) -> bytes:
             raise InvitePathError("data dir rejected")
         _tighten(path)
         return data
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError:

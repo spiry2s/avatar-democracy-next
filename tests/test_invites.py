@@ -171,10 +171,11 @@ def test_token_uses_32_bytes_and_is_not_stored(monkeypatch, tmp_path):
     columns = [row[1] for row in sqlite3.connect(tmp_path / "invites.sqlite").execute("PRAGMA table_info(invites)")]
     assert "token" not in columns
     assert "token_hash" in columns
-    key_mode = stat.S_IMODE((tmp_path / "invite-hmac.key").stat().st_mode)
-    assert key_mode == 0o600
-    db_mode = stat.S_IMODE((tmp_path / "invites.sqlite").stat().st_mode)
-    assert db_mode == 0o600
+    if os.name == "posix":  # Windows has no POSIX permission bits; chmod only toggles read-only
+        key_mode = stat.S_IMODE((tmp_path / "invite-hmac.key").stat().st_mode)
+        assert key_mode == 0o600
+        db_mode = stat.S_IMODE((tmp_path / "invites.sqlite").stat().st_mode)
+        assert db_mode == 0o600
     row = invites.get_invite(issued.invite.id)
     assert row is not None
     assert not hasattr(row, "token")
@@ -797,7 +798,10 @@ def test_path_traversal_is_rejected(tmp_path):
     root.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    (root / "link").symlink_to(outside, target_is_directory=True)
+    try:
+        (root / "link").symlink_to(outside, target_is_directory=True)
+    except OSError as e:  # Windows without Developer Mode / admin can't create symlinks
+        pytest.skip(f"cannot create symlinks here: {e}")
     with pytest.raises(invites.InvitePathError):
         invites.resolve_data_dir("link", project_root=root)
     with pytest.raises(invites.InvitePathError):
@@ -1002,3 +1006,14 @@ def test_old_invite_store_gains_daily_columns(tmp_path, monkeypatch):
     assert invites.try_reserve(issued.invite.id, 1, 0) == "ok"
     row = invites.get_invite(issued.invite.id)
     assert row is not None and row.bills_used == 1 and row.bills_used_today == 1
+
+
+def test_hmac_key_is_written_in_binary_mode(tmp_path, monkeypatch):
+    # On Windows a text-mode fd turns each 0x0A into 0x0D 0x0A, so ~12% of random
+    # keys grew past 32 bytes and every later invite call failed "data dir rejected".
+    from backend import invites
+
+    monkeypatch.setattr(invites.secrets, "token_bytes", lambda n: b"\n" * n)
+    key = invites._ensure_key(tmp_path)
+    assert key == b"\n" * 32
+    assert (tmp_path / invites.KEY_NAME).stat().st_size == 32
