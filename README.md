@@ -148,7 +148,9 @@ One admitted vote, endorsement, or simulated endorsement can still perform more 
 
 ## Paste a bill link
 
-On `/analyze`, next to the PDF upload, paste an `https` link. The same `url` field on `POST /api/analyze` fetches the document and runs it through the analysis pipeline used for an uploaded file. The field is optional. Pasted text and PDF upload are unchanged.
+On `/analyze` and `/vote`, next to the PDF upload, paste an `https` link. The same `url` field on `POST /api/analyze` fetches the document and runs it through the analysis pipeline used for an uploaded file. The field is optional. Pasted text and PDF upload are unchanged. Vote then runs the Avatar on that analysis, the same as a PDF or pasted text.
+
+Analyze can also hand a finished analysis to Vote. The button on the results stores the analysis JSON in the browser (`sessionStorage`) and opens `/vote`. Vote posts that object to `POST /api/avatar/vote` and does not call `/api/analyze`, so no second bill credit is reserved. The vote route still reserves one model call when the request is admitted, including when the analysis is then refused. The body is client-supplied: it is checked against the analysis schema, and it is refused before any model call when a field is longer than `AVATAR_MAX_BILL_CHARS`, when the text that would be sent to the model is longer than twice that cap, or when the posted text altogether is longer than six times that cap.
 
 Only the hosts in `OFFICIAL_BILL_HOSTS` (`backend/bill_fetch.py`) are fetched. The match is the exact hostname. A subdomain, a suffix, a look-alike, or any other site is rejected with a message that tells you to download the file and upload it. There is no environment variable that adds a host.
 

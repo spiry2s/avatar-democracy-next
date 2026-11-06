@@ -168,6 +168,17 @@ downloadJson.addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
+document.getElementById('vote-analysis').addEventListener('click', () => {
+  if (!lastAnalysis || typeof lastAnalysis !== 'object') return;
+  try {
+    sessionStorage.setItem(window.VOTE_HANDOFF_KEY, JSON.stringify({ v: 1, analysis: lastAnalysis }));
+  } catch (err) {
+    showError('Could not open the vote page with this analysis. Use Vote and analyze the bill there.');
+    return;
+  }
+  window.location.assign('/vote');
+});
+
 // ── Render results ────────────────────────────────────────────────────────────
 
 function renderResults(a, sourceChars) {

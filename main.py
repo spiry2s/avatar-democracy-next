@@ -57,6 +57,7 @@ from backend import (
     profile as profile_mod,
     questionnaire,
     summarizer,
+    vote_analysis,
 )
 from backend.bill_fetch import BillSourceError
 
@@ -1136,7 +1137,11 @@ async def remove_delegate_source(issue_area: str, source_id: str) -> JSONRespons
 
 
 class VoteRequest(BaseModel):
-    """A bill analysis (as produced by /api/analyze) for the Avatar to vote on."""
+    """A bill analysis (as produced by /api/analyze) for the Avatar to vote on.
+
+    The analysis is client-supplied. The handler checks it against the analysis
+    schema and the bill-size cap before the Avatar reads it.
+    """
 
     analysis: dict
 
@@ -1150,7 +1155,20 @@ class OverrideRequest(BaseModel):
 
 @app.post("/api/avatar/vote")
 async def avatar_vote(req: VoteRequest) -> JSONResponse:
-    """Cast the citizen's Avatar vote on a bill analysis."""
+    """Cast the citizen's Avatar vote on a bill analysis.
+
+    The body is the analysis JSON only. This route does not fetch a bill and
+    does not reserve a bill credit. Invite mode still reserves one model call
+    for this request, the same as any other vote. A forged or oversized
+    analysis is refused before the model is called.
+    """
+    try:
+        analysis = vote_analysis.accept_vote_analysis(req.analysis)
+    except vote_analysis.AnalysisRejected as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     p = profile_mod.load_profile()
     if p is None:
         raise HTTPException(
@@ -1159,7 +1177,7 @@ async def avatar_vote(req: VoteRequest) -> JSONResponse:
         )
 
     try:
-        vote = avatar.cast_vote(req.analysis, p)
+        vote = avatar.cast_vote(analysis, p)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     except ValueError as e:

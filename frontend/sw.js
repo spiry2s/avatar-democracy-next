@@ -5,7 +5,7 @@
    install does not call skipWaiting. The page posts SKIP_WAITING when the user reloads.
    Service workers run only on https or localhost. */
 
-const CACHE_VERSION = "avatar-democracy-shell-v4";
+const CACHE_VERSION = "avatar-democracy-shell-v5";
 
 const SHELL_PATHS = [
   "/analyze",

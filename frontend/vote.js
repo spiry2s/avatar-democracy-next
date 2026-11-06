@@ -1,9 +1,10 @@
-/* Vote — analyze a bill then have the Avatar vote on it */
+/* Vote — analyze a bill, or vote on an analysis handed off from Analyze. */
 
 const uploadZone = document.getElementById('upload-zone');
 const fileInput = document.getElementById('file-input');
 const fileInfo = document.getElementById('file-info');
 const fileName = document.getElementById('file-name');
+const billUrl = document.getElementById('bill-url');
 const textInput = document.getElementById('text-input');
 const voteBtn = document.getElementById('vote-btn');
 const statusEl = document.getElementById('status');
@@ -12,11 +13,14 @@ const statusSecondary = document.getElementById('status-secondary');
 const errorEl = document.getElementById('error');
 const errorText = document.getElementById('error-text');
 const resultsEl = document.getElementById('results');
+const HANDOFF_KEY = window.VOTE_HANDOFF_KEY;
 
 let activeTab = 'upload';
 let selectedFile = null;
 let currentVote = null;
 let excerptNote = '';
+let handoff = null;
+let busy = false;
 
 // ── Check profile exists ──────────────────────────────────────────────────────
 
@@ -65,37 +69,43 @@ function setFile(file) {
 }
 
 textInput.addEventListener('input', updateBtn);
+billUrl.addEventListener('input', updateBtn);
 function updateBtn() {
-  voteBtn.disabled = activeTab === 'upload' ? !selectedFile : textInput.value.trim().length < 100;
+  if (handoff) {
+    voteBtn.textContent = 'Vote on this analysis';
+    voteBtn.disabled = busy;
+    return;
+  }
+  voteBtn.textContent = 'Analyze & vote';
+  if (busy) {
+    voteBtn.disabled = true;
+    return;
+  }
+  if (activeTab === 'paste') {
+    voteBtn.disabled = textInput.value.trim().length < 100;
+    return;
+  }
+  voteBtn.disabled = !selectedFile && billUrl.value.trim().length === 0;
 }
 
-// ── Analyze then vote ─────────────────────────────────────────────────────────
+// ── Vote on a stored analysis, or analyze then vote ──────────────────────────
 
-voteBtn.addEventListener('click', async () => {
-  hideError();
-  resultsEl.classList.add('hidden');
-  setStatus(true, 'Analyzing the bill…', 'Reading and structuring the legislation.');
-
+async function voteOnAnalysis(analysis) {
+  const truncation = analysis && typeof analysis.truncation === 'object' && !Array.isArray(analysis.truncation)
+    ? analysis.truncation
+    : {};
+  excerptNote = truncation.truncated && !truncation.blocking ? oversizeNote(truncation) : '';
+  setStatus(true, 'Your Avatar is voting…', 'Applying your delegates, values, and compass to each section.');
   try {
-    // Step 1: analyze
-    const fd = new FormData();
-    if (activeTab === 'upload') fd.append('file', selectedFile);
-    else fd.append('text', textInput.value.trim());
-
-    const aRes = await apiFetch('/api/analyze', { method: 'POST', body: fd });
-    if (!aRes.ok) throw new Error((await aRes.json()).detail || `Analyze failed (HTTP ${aRes.status})`);
-    const analysis = (await aRes.json()).analysis;
-    const truncation = analysis.truncation || {};
-    excerptNote = truncation.truncated && !truncation.blocking ? oversizeNote(truncation) : '';
-
-    // Step 2: vote
-    setStatus(true, 'Your Avatar is voting…', 'Applying your delegates, values, and compass to each section.');
     const vRes = await apiFetch('/api/avatar/vote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ analysis }),
+      body: JSON.stringify({ analysis: analysis }),
     });
-    if (!vRes.ok) throw new Error((await vRes.json()).detail || `Vote failed (HTTP ${vRes.status})`);
+    if (!vRes.ok) {
+      const err = await vRes.json().catch(() => ({ detail: `HTTP ${vRes.status}` }));
+      throw new Error(err.detail || `Vote failed (HTTP ${vRes.status})`);
+    }
     currentVote = (await vRes.json()).vote;
     renderVote(currentVote);
   } catch (err) {
@@ -103,13 +113,152 @@ voteBtn.addEventListener('click', async () => {
   } finally {
     setStatus(false);
   }
+}
+
+voteBtn.addEventListener('click', async () => {
+  hideError();
+  resultsEl.classList.add('hidden');
+  if (handoff) {
+    await voteOnAnalysis(handoff);
+    return;
+  }
+
+  const formData = new FormData();
+  let loadingMode = 'analyze';
+  if (activeTab === 'paste') {
+    const text = textInput.value.trim();
+    if (text.length < 100) {
+      showError('Text too short — paste more of the bill.');
+      return;
+    }
+    formData.append('text', text);
+  } else {
+    const url = billUrl.value.trim();
+    if (selectedFile && url) {
+      showError('Use either a PDF or a link, not both.');
+      return;
+    }
+    if (url) {
+      formData.append('url', url);
+      loadingMode = 'url';
+    } else if (selectedFile) {
+      formData.append('file', selectedFile);
+    } else {
+      showError('Select a PDF or paste a bill link.');
+      return;
+    }
+  }
+
+  if (loadingMode === 'url') {
+    setStatus(true, 'Fetching the bill…', 'Reading the official source, then analyzing.');
+  } else {
+    setStatus(true, 'Analyzing the bill…', 'Reading and structuring the legislation.');
+  }
+
+  try {
+    const aRes = await apiFetch('/api/analyze', { method: 'POST', body: formData });
+    if (!aRes.ok) {
+      const err = await aRes.json().catch(() => ({ detail: `HTTP ${aRes.status}` }));
+      throw new Error(err.detail || `Analyze failed (HTTP ${aRes.status})`);
+    }
+    const analysis = (await aRes.json()).analysis;
+    setStatus(false);
+    await voteOnAnalysis(analysis);
+  } catch (err) {
+    showError(err.message);
+    setStatus(false);
+  }
 });
 
 function setStatus(on, primary, secondary) {
-  voteBtn.disabled = on;
+  busy = on;
   statusEl.classList.toggle('hidden', !on);
-  if (on) { statusPrimary.textContent = primary; statusSecondary.textContent = secondary || ''; }
+  if (on) {
+    voteBtn.disabled = true;
+    statusPrimary.textContent = primary;
+    statusSecondary.textContent = secondary || '';
+  } else {
+    updateBtn();
+  }
 }
+
+function parseHandoff(raw) {
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (err) {
+    return null;
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data) || data.v !== 1) return null;
+  if (!data.analysis || typeof data.analysis !== 'object' || Array.isArray(data.analysis)) return null;
+  return data.analysis;
+}
+
+function clearHandoff() {
+  handoff = null;
+  try {
+    sessionStorage.removeItem(HANDOFF_KEY);
+  } catch (err) {
+    /* storage may be blocked; the in-memory handoff is already gone */
+  }
+  const banner = document.getElementById('handoff-banner');
+  if (banner) banner.classList.add('hidden');
+  const note = document.getElementById('handoff-note');
+  if (note) {
+    note.textContent = '';
+    note.classList.add('hidden');
+  }
+  updateBtn();
+}
+
+function showHandoff(analysis) {
+  handoff = analysis;
+  const label = document.getElementById('handoff-bill');
+  const note = document.getElementById('handoff-note');
+  const title = typeof analysis.title === 'string' ? analysis.title.trim() : '';
+  label.textContent = title || 'Untitled bill';
+  const truncation = analysis.truncation && typeof analysis.truncation === 'object' && !Array.isArray(analysis.truncation)
+    ? analysis.truncation
+    : null;
+  if (note) {
+    if (truncation && (truncation.truncated || truncation.blocking)) {
+      note.textContent = truncation.blocking
+        ? (typeof truncation.message === 'string' && truncation.message ? truncation.message : 'The bill was truncated.')
+        : oversizeNote(truncation);
+      note.classList.remove('hidden');
+    } else {
+      note.textContent = '';
+      note.classList.add('hidden');
+    }
+  }
+  document.getElementById('handoff-banner').classList.remove('hidden');
+  updateBtn();
+}
+
+function loadHandoff() {
+  let raw = null;
+  try {
+    raw = sessionStorage.getItem(HANDOFF_KEY);
+  } catch (err) {
+    handoff = null;
+    return;
+  }
+  if (!raw) {
+    handoff = null;
+    return;
+  }
+  const analysis = parseHandoff(raw);
+  if (!analysis) {
+    clearHandoff();
+    return;
+  }
+  showHandoff(analysis);
+}
+
+document.getElementById('handoff-clear').addEventListener('click', () => {
+  clearHandoff();
+  hideError();
+});
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -284,3 +433,5 @@ function escHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
+
+loadHandoff();

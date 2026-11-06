@@ -529,7 +529,7 @@ def test_rate_limit_is_per_ip(monkeypatch):
 def test_service_worker_waits_for_the_page_to_reload():
     js = (FRONTEND / "sw.js").read_text(encoding="utf-8")
     assert MAIN_CACHE_VERSION not in js
-    assert 'CACHE_VERSION = "avatar-democracy-shell-v4"' in js
+    assert 'CACHE_VERSION = "avatar-democracy-shell-v5"' in js
     assert "decodeURIComponent" in js
     assert "canonicalPath" in js
     install = _listener(js, "install")

@@ -299,6 +299,34 @@ h3 { font-size: var(--text-lg); font-weight: 600; line-height: var(--leading-tig
   color: var(--text-muted);
 }
 
+.results-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.handoff-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.handoff-bill {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+#handoff-banner {
+  align-items: flex-start;
+}
+
+#handoff-clear {
+  flex-shrink: 0;
+}
+
 @media (min-width: 800px) {
   .upload-layout {
     flex-direction: row;

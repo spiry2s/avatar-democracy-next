@@ -2,6 +2,8 @@
    Class and attribute helpers return fixed strings. Callers must not paste model text into class names. */
 (function () {
   var STORAGE_KEY = "avatarDemocracyAccessToken";
+  // Analyze writes this; Vote reads it. The value is { v: 1, analysis }.
+  window.VOTE_HANDOFF_KEY = "avatarDemocracyVoteAnalysis";
 
   window.SIG_CLASSES = { high: "sig-high", medium: "sig-medium", low: "sig-low" };
   window.FLAG_CLASSES = { high: "flag-high", medium: "flag-medium", low: "flag-low" };
