@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 import main
+from backend import invites
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
@@ -684,6 +685,152 @@ def test_host_allowlist_rejects_rebinding_tricks(loopback, monkeypatch):
         headers={"Host": "127.0.0.1:8000", "Origin": "http://127.0.0.1:9999"},
     )
     assert mismatched_port.status_code == 403
+
+
+def _origin_allowed(origins: list[bytes], host: bytes = b"127.0.0.1:8080") -> bool:
+    headers = [(b"host", host), *((b"origin", value) for value in origins)]
+    return main._origin_allowed(Request(_scope("POST", "/api/profile", headers)))
+
+
+def test_origin_accepts_scheme_default_or_bind_port(monkeypatch):
+    """A browser Origin on 443 must pass when the process listens on 8080.
+
+    Railway terminates TLS and forwards to $PORT. The Host allowlist already
+    accepts a host with no port. The Origin check must accept that same host
+    when the port is the scheme default or the bound port, and nothing else.
+    """
+    monkeypatch.setattr(main, "bind_port", 8080)
+    monkeypatch.setenv("ALLOWED_HOSTS", "allowed-host")
+
+    assert _origin_allowed([b"https://allowed-host"]) is True
+    assert _origin_allowed([b"http://allowed-host:8080"]) is True
+    assert _origin_allowed([b"https://evil.example"]) is False
+    assert _origin_allowed([b"https://evil.example:443"]) is False
+    assert _origin_allowed([b"http://evil.example"]) is False
+    assert _origin_allowed([b"http://evil.example:80"]) is False
+    assert _origin_allowed([b"http://evil.example:8080"]) is False
+    assert _origin_allowed([b"https://allowed-host:4443"]) is False
+    assert _origin_allowed([b"null"]) is False
+    assert _origin_allowed([b"NULL"]) is False
+    assert _origin_allowed([b" null "]) is False
+    assert _origin_allowed([
+        b"https://allowed-host",
+        b"https://allowed-host",
+    ]) is False
+    assert _origin_allowed([
+        b"https://allowed-host",
+        b"https://evil.example",
+    ]) is False
+    assert _origin_allowed([b"https://allowed-host, https://allowed-host"]) is False
+
+    # Host headers stay "bound port or no port". A scheme-default port is not
+    # a Host match unless it is also the port this process bound.
+    assert main.host_header_allowed(["allowed-host"]) is True
+    assert main.host_header_allowed(["allowed-host:8080"]) is True
+    assert main.host_header_allowed(["allowed-host:443"]) is False
+    assert main.host_header_allowed(["allowed-host:80"]) is False
+    assert main.host_header_allowed(["evil.example"]) is False
+
+
+def test_origin_scheme_default_rejects_lookalike_forms(monkeypatch):
+    monkeypatch.setattr(main, "bind_port", 8080)
+    monkeypatch.setenv("ALLOWED_HOSTS", "allowed-host, [2001:db8::10]")
+
+    assert _origin_allowed([b"https://[::1]"]) is True
+    assert _origin_allowed([b"https://[::1]:443"]) is True
+    assert _origin_allowed([b"https://[::1]:8080"]) is True
+    assert _origin_allowed([b"http://[::1]:80"]) is True
+    assert _origin_allowed([b"https://[2001:DB8::10]"]) is True
+    assert _origin_allowed([b"https://[2001:db8::1]"]) is False
+    assert _origin_allowed([b"https://[::1%25eth0]"]) is False
+    assert _origin_allowed([b"https://[::ffff:127.0.0.1]"]) is False
+    assert _origin_allowed([b"https://[::1]:4443"]) is False
+
+    assert _origin_allowed([b"https://ALLOWED-HOST"]) is True
+    assert _origin_allowed([b"HTTPS://Allowed-Host"]) is True
+    assert _origin_allowed([b"https://allowed-host."]) is True
+    assert _origin_allowed([b"https://allowed-host.:443"]) is True
+    assert _origin_allowed([b"https://127.0.0.1."]) is True
+    assert _origin_allowed([b"https://allowed-host:443"]) is True
+    assert _origin_allowed([b"http://allowed-host"]) is True
+    assert _origin_allowed([b"http://allowed-host:80"]) is True
+    assert _origin_allowed([b"https://allowed-host:8080"]) is True
+    assert _origin_allowed([b"http://localhost:8080/"]) is True
+
+    assert _origin_allowed([b"https://user:pass@allowed-host"]) is False
+    assert _origin_allowed([b"https://user@allowed-host"]) is False
+    assert _origin_allowed([b"https://@allowed-host"]) is False
+    assert _origin_allowed([b"http://user:pass@allowed-host:8080"]) is False
+    assert _origin_allowed([b"https://user:pass@[::1]:443"]) is False
+    assert _origin_allowed([b"https://allowed-host:80"]) is False
+    assert _origin_allowed([b"http://allowed-host:443"]) is False
+    assert _origin_allowed([b"https://allowed-host.evil.example"]) is False
+    assert _origin_allowed([b"https://127.0.0.1.allowed-host"]) is False
+    assert _origin_allowed([b"https://allowed-host/extra"]) is False
+    assert _origin_allowed([b"https://allowed-host#fragment"]) is False
+    assert _origin_allowed([]) is True
+
+
+def test_profile_post_accepts_implicit_https_origin(monkeypatch, tmp_path):
+    """POST /api/profile with an invite cookie, the LAN token, and Origin on 443."""
+    monkeypatch.setenv("AVATAR_INVITE_MODE", "1")
+    monkeypatch.setenv("AVATAR_INVITE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_ACCESS_TOKEN", TOKEN)
+    monkeypatch.setenv("ALLOWED_HOSTS", "demo.avatardemocracy.org")
+    monkeypatch.setattr(main, "bind_host", "0.0.0.0")
+    monkeypatch.setattr(main, "bind_port", 8080)
+    monkeypatch.setattr(main.audit, "log_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(main.profile_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main.profile_mod, "PROFILE_FILE", tmp_path / "profile.json")
+    main.reset_rate_limits()
+    invites.close_store()
+    try:
+        issued = invites.create_invite(label="ada")
+        client = TestClient(main.app, base_url="http://127.0.0.1:8080")
+        closed = client.post(
+            "/api/profile",
+            json={"values": "before the cookie"},
+            headers={
+                "X-Access-Token": TOKEN,
+                "Origin": "https://demo.avatardemocracy.org",
+            },
+        )
+        assert closed.status_code == 403
+        assert closed.json()["detail"] == "Forbidden"
+
+        assert client.get("/", params={"token": issued.token}, follow_redirects=False).status_code == 303
+
+        no_token = client.post(
+            "/api/profile",
+            json={"values": "missing token"},
+            headers={"Origin": "https://demo.avatardemocracy.org"},
+        )
+        assert no_token.status_code == 401
+        assert no_token.json()["detail"] == "Unauthorized"
+
+        bad_origin = client.post(
+            "/api/profile",
+            json={"values": "wrong origin"},
+            headers={
+                "X-Access-Token": TOKEN,
+                "Origin": "https://evil.example",
+            },
+        )
+        assert bad_origin.status_code == 403
+        assert bad_origin.json()["detail"] == "Forbidden"
+
+        saved = client.post(
+            "/api/profile",
+            json={"questionnaire_answers": {}, "values": "careful"},
+            headers={
+                "X-Access-Token": TOKEN,
+                "Origin": "https://demo.avatardemocracy.org",
+            },
+        )
+        assert saved.status_code == 200
+        assert saved.json()["profile"]["values"] == "careful"
+    finally:
+        invites.close_store()
 
 
 def test_lan_bind_allows_its_address_and_rejects_others(monkeypatch):

@@ -398,16 +398,35 @@ def _split_origin(value: str) -> tuple[str, str, int] | None:
     except ValueError:
         return None
     if port is None:
+        # An omitted port is the scheme default. Callers may accept that
+        # default even when this process is bound to a different port.
         port = 443 if scheme == "https" else 80
     return scheme, host.lower(), port
+
+
+def _origin_port_accepted(scheme: str, port: int) -> bool:
+    """True for the bound port, or for 443 on https and 80 on http.
+
+    A browser sends `https://name` with no port. Behind TLS termination the
+    process often listens on another port, such as Railway's `$PORT`, and
+    that implicit 443 is still the page's origin.
+    """
+    if port == bind_port:
+        return True
+    if scheme == "https":
+        return port == 443
+    if scheme == "http":
+        return port == 80
+    return False
 
 
 def _origin_allowed(request: Request) -> bool:
     """Missing Origin is allowed. A present Origin must name an allowed host.
 
-    The comparison is the allowlist plus http or https plus the bound port.
-    It is not "Origin equals this request's Host". `null`, a different port,
-    a different host, or more than one Origin value is rejected.
+    The host must be on the allowlist. The port must be the bound port or the
+    scheme default (443 for https, 80 for http), including when the browser
+    omits it. It is not "Origin equals this request's Host". `null`, a
+    different port, a different host, or more than one Origin value is rejected.
     """
     origins = _raw_header_values(request, "origin")
     if not origins:
@@ -420,7 +439,7 @@ def _origin_allowed(request: Request) -> bool:
     scheme, host, port = got
     if scheme not in {"http", "https"}:
         return False
-    if port != bind_port:
+    if not _origin_port_accepted(scheme, port):
         return False
     return _normalize_hostname(host) in allowed_host_names()
 
