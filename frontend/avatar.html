@@ -25,7 +25,8 @@
     </a>
     <nav>
       <a href="/analyze" class="nav-link">Analyze</a>
-      <a href="/avatar" class="nav-link active">My Avatar</a>
+      <a href="/avatar#compass" class="nav-link active">Compass</a>
+      <a href="/avatar" class="nav-link">My Avatar</a>
       <a href="/vote" class="nav-link">Vote</a>
       <a href="/bills" class="nav-link">Bills</a>
       <a href="/chamber" class="nav-link">Chamber</a>
@@ -40,19 +41,22 @@
   <section class="hero">
     <div class="eyebrow">Configure · Your delegated will</div>
     <h1>Set up your Avatar</h1>
-    <p class="lead">Your Avatar votes on legislation for you. Tell it what you care about three ways: a quick compass, your own words, and the people you trust on specific issues.</p>
+    <p class="lead">Your Avatar can record a position from what you set here. You can change the setup or override a later vote. Three parts: a coarse compass, your own words, and people you choose on specific issues.</p>
   </section>
 
   <!-- Step 1: Questionnaire -->
-  <section class="result-card">
+  <section class="result-card" id="compass">
     <div class="result-card-header">
       <h3>1 · Political compass</h3>
-      <span class="badge" id="compass-status">Not set</span>
+      <span class="badge" id="compass-status">Not saved</span>
     </div>
     <div class="result-card-body">
-      <p class="muted">A fallback signal your Avatar uses only when no delegate or values statement covers a bill. Answer what you can — skip what you don't care about.</p>
+      <p id="compass-notice">A coarse compass is not a full political identity and not a validated psychometric test. Nothing here is a scientific score. It is only a fallback the Avatar can use when you have not written values or named a delegate for that part of a bill. Unanswered axes sit in the middle. You can change or clear every answer, then save.</p>
+      <div id="axis-legend"></div>
       <div id="questionnaire"></div>
+      <p class="muted" id="compass-hint">Choose any answers you want. Nothing is selected for you.</p>
       <div class="compass-readout hidden" id="compass-readout"></div>
+      <button type="button" class="btn-secondary" id="compass-clear">Clear compass answers</button>
     </div>
   </section>
 
@@ -62,8 +66,8 @@
       <h3>2 · Values, in your own words</h3>
     </div>
     <div class="result-card-body">
-      <p class="muted">Free text. What do you prioritize? What are you skeptical of? The more specific, the better your Avatar represents you. e.g. "I prioritize civil liberties and fiscal restraint. Skeptical of new surveillance powers and corporate subsidies. Pro-renewable energy but wary of mandates that hit low-income households."</p>
-      <textarea id="values-input" rows="6" placeholder="Write your values here..."></textarea>
+      <p class="muted">Free text. Say what you want the Avatar to follow, in your own words. Nothing is filled in for you. The more specific you are, the less the compass is used as a fallback.</p>
+      <textarea id="values-input" rows="6" placeholder="Write what you want your Avatar to follow, in your own words."></textarea>
     </div>
   </section>
 
@@ -77,8 +81,8 @@
       <p class="muted">On specific issues, follow someone you trust. Your Avatar approximates how they'd vote from their public positions. <strong>Adding</strong> a delegate has a cooling-off period before it takes effect; <strong>revoking</strong> is instant.</p>
 
       <div class="delegate-form">
-        <input type="text" id="del-issue" placeholder="Issue area (e.g. fiscal, climate)" class="title-field">
-        <input type="text" id="del-name" placeholder="Delegate (e.g. Sen. Rand Paul)" class="title-field">
+        <input type="text" id="del-issue" placeholder="Issue area (for example, housing)" class="title-field">
+        <input type="text" id="del-name" placeholder="Person or group you choose" class="title-field">
         <button class="btn-secondary" id="del-add">Add delegate</button>
       </div>
       <input type="text" id="del-note" placeholder="Optional note: scope or why" class="title-field full-width">

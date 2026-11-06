@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import quote, urlsplit, urlencode
+from urllib.parse import quote, unquote, urlsplit, urlencode
 
 # 32 bytes from the OS CSPRNG. token_urlsafe encodes that; it is not 32 characters.
 TOKEN_BYTES = 32
@@ -793,31 +793,60 @@ def authenticate_cookie(request: Any) -> Invite | None:
     return authenticate(values[0])
 
 
-def _static_path(path: str) -> bool:
-    if path in {"/manifest.webmanifest", "/sw.js"}:
-        return True
-    if path != "/static" and not path.startswith("/static/"):
-        return False
-    if ".." in path or "\\" in path or "\x00" in path:
-        return False
-    return True
+# Exact public files for the landing page. Not a directory mount.
+PUBLIC_LANDING_ASSETS = frozenset({
+    "/landing/style.css",
+    "/landing/favicon.svg",
+})
+def _decoded_path(path: str) -> str:
+    """Decode percent-encoding twice so ``%2e%2e`` and ``%252e%252e`` cannot skip the ``..`` check."""
+    decoded = path
+    for _ in range(2):
+        nxt = unquote(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+    return decoded
+
+
+def _rejects_traversal(path: str) -> bool:
+    decoded = _decoded_path(path)
+    return ".." in decoded or "\\" in decoded or "\x00" in decoded
 
 
 def request_is_exempt(method: str, path: str) -> bool:
-    """Static shell and the token landing do not require a cookie."""
-    if _static_path(path):
+    """Static shell, the public landing, and the token landing do not require a cookie.
+
+    ``/`` is exempt so the route can show the public page or the prototype.
+    Application files under ``/static/``, the manifest, and ``sw.js`` are not exempt.
+    Encoded ``..`` is not exempt.
+    """
+    if _rejects_traversal(path):
+        return False
+    if method in {"GET", "HEAD"} and path in PUBLIC_LANDING_ASSETS:
         return True
     if method in {"GET", "HEAD"} and path in {"/", "/invite"}:
         return True
     return False
 
 
+def _denial_html() -> str:
+    """Public landing, or the short closed page if that file is missing."""
+    landing = PROJECT_ROOT / "landing" / "index.html"
+    try:
+        if landing.is_file():
+            return landing.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return DENIED_HTML
+
+
 def denied_page():
-    """Same HTML for a missing, unknown, expired, or revoked invite."""
+    """Same HTML for a presented invite that does not match. No reason is included."""
     from starlette.responses import HTMLResponse
 
     return HTMLResponse(
-        DENIED_HTML,
+        _denial_html(),
         status_code=403,
         headers={
             "Cache-Control": "no-store",

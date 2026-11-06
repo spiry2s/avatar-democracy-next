@@ -63,6 +63,7 @@ from backend.bill_fetch import BillSourceError
 # Resolve frontend directory relative to project root
 PROJECT_ROOT = Path(__file__).parent
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
+LANDING_DIR = PROJECT_ROOT / "landing"
 
 # ── LAN access token, browser guards, startup banner ─────────────────────────
 #
@@ -618,11 +619,13 @@ def guard_api_request(request: Request) -> Response | None:
     """Block a bad request. None means the route may run.
 
     Host is checked on every route, including pages, before Origin and before
-    either credential. When invite mode is on, every route except static files
-    and the token landing needs a valid invite cookie. That check does not
-    replace the LAN token: a non-loopback bind still requires X-Access-Token
-    on /api, and the shared per-IP limit still runs on spending routes.
-    Invite budgets are reserved in that same spending branch.
+    either credential. When invite mode is on, every route except static files,
+    the public landing assets, and the token landing needs a valid invite
+    cookie. ``/`` is exempt here so the route can serve the public page or the
+    prototype. A LAN access token does not take the place of an invite. A
+    non-loopback bind still requires X-Access-Token on /api, and the shared
+    per-IP limit still runs on spending routes. Invite budgets are reserved
+    in that same spending branch.
     """
     if not host_header_allowed(_raw_header_values(request, "host")):
         return _deny(421, "Misdirected Request")
@@ -687,15 +690,31 @@ async def reject_untrusted_api_requests(request: Request, call_next):
     valid invite. The raw token is not logged.
     """
     usage_token = llm.begin_request_usage()
+    scope_token = None
+    audit_token = None
     try:
         blocked = guard_api_request(request)
         if blocked is not None:
             invites.record_request(request, blocked.status_code, blocked, llm.snapshot_request_usage())
             return _with_security_headers(blocked)
+        record = getattr(request.state, "invite", None)
+        if invites.invite_mode_enabled() and isinstance(record, invites.Invite):
+            try:
+                root = invites.resolve_data_dir()
+            except invites.InvitePathError:
+                denied = invites.denied_page()
+                invites.record_request(request, denied.status_code, denied, llm.snapshot_request_usage())
+                return _with_security_headers(denied)
+            scope_token = profile_mod.push_scope(record.id, root)
+            audit_token = audit.push_scope(record.id, root)
         response = await call_next(request)
         invites.record_request(request, response.status_code, response, llm.snapshot_request_usage())
         return _with_security_headers(response)
     finally:
+        if scope_token is not None:
+            profile_mod.reset_scope(scope_token)
+        if audit_token is not None:
+            audit.reset_scope(audit_token)
         llm.end_request_usage(usage_token)
 
 
@@ -733,12 +752,71 @@ def _serve(filename: str) -> FileResponse:
     return FileResponse(page)
 
 
+def _serve_home() -> FileResponse:
+    """Prototype home. In invite mode the body depends on the cookie, so do not cache it."""
+    response = _serve("index.html")
+    if invites.invite_mode_enabled():
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Vary"] = "Cookie"
+    return response
+
+
+def _landing_asset(name: str, media_type: str) -> FileResponse:
+    path = (LANDING_DIR / name).resolve()
+    if path.parent != LANDING_DIR.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+def _public_landing() -> FileResponse:
+    page = LANDING_DIR / "index.html"
+    if not page.is_file():
+        raise HTTPException(status_code=500, detail="Landing file missing")
+    return FileResponse(
+        page,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store",
+            "Vary": "Cookie",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/landing/style.css", include_in_schema=False)
+def landing_style() -> FileResponse:
+    return _landing_asset("style.css", "text/css; charset=utf-8")
+
+
+@app.get("/landing/favicon.svg", include_in_schema=False)
+def landing_icon() -> FileResponse:
+    return _landing_asset("favicon.svg", "image/svg+xml")
+
+
 @app.get("/")
 async def root(request: Request) -> Response:
-    """Serve the landing page. In invite mode this is also the token exchange."""
-    if invites.invite_mode_enabled():
-        return invites.landing(request, serve_index=lambda: _serve("index.html"))
-    return _serve("index.html")
+    """Prototype home, or the public page when invite mode has no valid invite.
+
+    A token query is still the invite exchange. A valid token redirects here
+    without the token, and the next request opens the prototype. A token that
+    does not match does not open the prototype and does not set a cookie.
+    """
+    if not invites.invite_mode_enabled():
+        return _serve("index.html")
+    if request.query_params.getlist("token"):
+        return invites.landing(request, serve_index=_serve_home)
+    try:
+        record = invites.authenticate_cookie(request)
+    except invites.InvitePathError:
+        record = None
+    if record is None:
+        return _public_landing()
+    request.state.invite = record
+    return _serve_home()
 
 
 @app.get("/invite")
@@ -969,7 +1047,11 @@ async def put_profile(req: ProfileRequest) -> JSONResponse:
     is_new = existing is None
     p = existing or profile_mod.CitizenProfile()
 
-    p.questionnaire_answers = req.questionnaire_answers or p.questionnaire_answers
+    try:
+        answers = questionnaire.clean_answers(req.questionnaire_answers)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    p.questionnaire_answers = answers
     p.compass = questionnaire.score(p.questionnaire_answers)
     p.values = req.values
 

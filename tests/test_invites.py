@@ -117,7 +117,10 @@ def _run_cli(tmp_path: Path, *args: str, extra_env: dict[str, str] | None = None
 def test_mode_off_leaves_the_app_open(client, tmp_path):
     assert invites.invite_mode_enabled() is False
     assert client.get("/api/health").status_code == 200
-    assert client.get("/").status_code == 200
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "home-hero" in home.text
+    assert 'id="public-landing"' not in home.text
     assert client.get("/openapi.json").status_code == 200
     assert client.get("/invite").status_code == 404
     probed = client.get("/", params={"token": "not-a-token"})
@@ -261,25 +264,35 @@ def test_failure_pages_and_api_errors_do_not_leak_a_reason(monkeypatch):
     invites.revoke_invite(revoked.invite.id)
     pages = []
     apis = []
+    no_token = None
     for token in (None, "not-a-real-token-value", expired.token, revoked.token):
         page_client = TestClient(main.app, base_url="http://127.0.0.1:8000")
         api_client = TestClient(main.app, base_url="http://127.0.0.1:8000")
         if token is None:
-            pages.append(page_client.get("/"))
+            no_token = page_client.get("/")
             apis.append(api_client.get("/api/health"))
         else:
             pages.append(page_client.get("/", params={"token": token}))
             api_client.cookies.set(invites.COOKIE_NAME, token)
             apis.append(api_client.get("/api/health"))
+    assert no_token is not None and no_token.status_code == 200
+    assert 'id="public-landing"' in no_token.text
+    assert "home-hero" not in no_token.text
+    assert "set-cookie" not in no_token.headers
     bodies = {response.text for response in pages}
     assert len(bodies) == 1
+    assert bodies == {no_token.text}
     assert {response.status_code for response in pages} == {403}
     page = pages[0]
     assert "text/html" in page.headers["content-type"]
     assert "this demo is closed" in page.text.lower()
     for word in ("expir", "revok", "invalid", "unknown", "token", SENTINEL.lower()):
         assert word not in page.text.lower()
+    assert expired.token not in page.text
+    assert revoked.token not in page.text
     assert "<script" not in page.text.lower()
+    assert "github.com" not in page.text.lower()
+    assert "javascript:" not in page.text.lower()
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert page.headers["cache-control"] == "no-store"
     assert {response.status_code for response in apis} == {403}
@@ -309,7 +322,8 @@ def test_happy_path_strips_the_token_and_sets_cookie_flags(monkeypatch, client, 
     followed = client.get("/", params={"token": issued.token}, follow_redirects=True)
     assert followed.status_code == 200
     assert issued.token not in str(followed.url)
-    assert "Avatar Democracy" in followed.text
+    assert "home-hero" in followed.text
+    assert 'id="public-landing"' not in followed.text
     assert client.get("/api/health").status_code == 200
     for path in ("/analyze", "/avatar", "/vote", "/history", "/bills", "/chamber"):
         page = client.get(path)
@@ -346,22 +360,27 @@ def test_invite_alias_and_token_on_another_path_does_not_sign_in(monkeypatch):
     assert "set-cookie" not in both.headers
 
 
-def test_static_assets_skip_the_cookie_and_pages_do_not(monkeypatch, client):
+def test_app_source_requires_the_cookie_and_pages_do_not_load_without_it(monkeypatch, client):
     _enable(monkeypatch)
     for path in ("/static/api.js", "/static/style.css", "/manifest.webmanifest", "/sw.js"):
         response = client.get(path)
-        assert response.status_code == 200, path
-        assert "default-src 'self'" in response.headers["content-security-policy"]
+        assert response.status_code == 403, path
+        assert "function" not in response.text
     assert client.get("/analyze").status_code == 403
     assert client.get("/api/health").status_code == 403
     blocked = main.guard_api_request(
         Request(_scope("GET", "/static/../.env", [(b"host", b"127.0.0.1:8000")]))
     )
     assert blocked is not None and blocked.status_code == 403
-    allowed = main.guard_api_request(
+    also = main.guard_api_request(
         Request(_scope("GET", "/static/api.js", [(b"host", b"127.0.0.1:8000")]))
     )
-    assert allowed is None
+    assert also is not None and also.status_code == 403
+    issued = invites.create_invite(label="ada")
+    assert _redeem(client, issued).status_code == 303
+    opened = client.get("/static/api.js")
+    assert opened.status_code == 200
+    assert "default-src 'self'" in opened.headers["content-security-policy"]
 
 
 def test_duplicate_cookie_is_rejected(monkeypatch):
