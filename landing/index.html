@@ -17,7 +17,6 @@
       <nav aria-label="On this page">
         <ul>
           <li><a href="#how">How it works</a></li>
-          <li><a href="#example">Example</a></li>
           <li><a href="#control">Citizen control</a></li>
           <li><a href="#today">Today</a></li>
         </ul>
@@ -28,13 +27,11 @@
     <div class="wrap">
       <div class="hero">
         <div>
-          <p class="kicker">Open source · early prototype</p>
+          <p class="kicker">Closed demo</p>
           <h1>Bringing direct democracy into the 21st century</h1>
           <p class="lede">Citizens configure a personal Avatar, review what it reads, and override any position it would record. This demo is closed. Without an invite, this page is the only part you can open.</p>
           <ul class="actions">
-            <li><a class="primary" href="https://github.com/spiry2s/avatar-democracy/blob/main/ai_avatar_democracy_v1.1.md">Read the white paper</a></li>
-            <li><a href="https://github.com/spiry2s/avatar-democracy">See the code</a></li>
-            <li><a href="/invite">Continue to the demo</a></li>
+            <li><a class="primary" href="/invite">Continue to the demo</a></li>
           </ul>
         </div>
         <figure class="diagram">
@@ -96,42 +93,6 @@
         </ul>
       </section>
 
-      <section id="example">
-        <p class="section-kicker">Worked example</p>
-        <h2>A fictional bill, not the analyzer</h2>
-        <p class="example-banner">Fictional example. North Wharf is an invented place. This is not legislation, not the bill analyzer, and no model is called.</p>
-        <div class="example">
-          <div class="example-grid">
-            <pre class="bill" id="example-bill">AN EXAMPLE BILL
-This text is fictional. North Wharf is not a real place.
-
-1. Short title.
-This example may be called the North Wharf Lantern Act.
-
-2. Harbour lights.
-The harbour keeper shall keep the wall lanterns lit from dusk until dawn.
-
-3. Waiver.
-The harbour warden may waive that duty for any vessel the warden names, and need not publish a reason.
-
-4. Spending.
-Of the money set aside for lanterns, half shall go to a workshop on the sponsor's own quay.</pre>
-            <div>
-              <ul class="section-buttons" id="example-sections">
-                <li><button type="button" aria-pressed="true" data-quote="This example may be called the North Wharf Lantern Act." data-summary="Example reading: the text gives this fictional bill a short title.">1 · Short title</button></li>
-                <li><button type="button" aria-pressed="false" data-quote="The harbour keeper shall keep the wall lanterns lit from dusk until dawn." data-summary="Example reading: the keeper would keep the wall lanterns lit from dusk until dawn.">2 · Harbour lights</button></li>
-                <li><button type="button" aria-pressed="false" data-quote="The harbour warden may waive that duty for any vessel the warden names, and need not publish a reason." data-summary="Example reading: the warden could waive the lighting duty for a named vessel without publishing a reason." data-flag="Example flag: the waiver names no limit and no public reason." data-second="Second example reading: someone else might call the same sentence a narrow safety valve. This page does not decide which reading is right.">3 · Waiver</button></li>
-                <li><button type="button" aria-pressed="false" data-quote="half shall go to a workshop on the sponsor's own quay." data-summary="Example reading: half of the lantern money would go to a workshop on the sponsor's quay.">4 · Spending</button></li>
-                <li><button type="button" aria-pressed="false" data-quote="The Act bans every ferry from the harbour." data-summary="Example claim: the bill bans every ferry. This quote is not in the text, so the illustration withholds it.">5 · A claim to withhold</button></li>
-              </ul>
-              <button type="button" class="second-toggle" id="example-second" aria-pressed="false">Show a second example reading</button>
-              <div class="reading" id="example-reading" aria-live="polite"></div>
-              <noscript><p>The buttons need the page script to switch the example. They still do not contact a model.</p></noscript>
-            </div>
-          </div>
-        </div>
-      </section>
-
       <section id="control">
         <p class="section-kicker">Citizen control</p>
         <h2>The person stays in charge</h2>
@@ -148,15 +109,15 @@ Of the money set aside for lanterns, half shall go to a workshop on the sponsor'
           <div>
             <h2>What you can run today</h2>
             <ul class="plain">
-              <li>A local prototype: bill reading, one Avatar, a bill path, and a synthetic chamber. Start it from the repository with <code>python main.py</code>. Model calls need your own API key.</li>
-              <li>Quote checks, optional comparison, overrides, and an audit log, as implemented in the repository.</li>
+              <li>Invited testers can read a bill, set one Avatar, and walk a bill path. The chamber in that demo is synthetic, not real voters.</li>
+              <li>Quote checks, an optional second reading, overrides, and an audit log stay inside the demo.</li>
               <li>On this server, those pages stay behind an invite. Opening this page does not sign you in. An invite link is the way in.</li>
             </ul>
           </div>
           <div>
             <h2>Research and open questions</h2>
             <ul class="plain">
-              <li>The white paper is a working document. Its open problems are listed in the paper.</li>
+              <li>Whether any of this should carry formal weight is a separate legal choice. This page does not make that choice.</li>
               <li>Whether any jurisdiction ever gives an Avatar tally formal weight is a separate legal choice. This page does not make that choice.</li>
               <li>Agreement between models is not proof. The synthetic chamber is a demo population, not real voters, and not a live vote count.</li>
             </ul>
@@ -167,7 +128,7 @@ Of the money set aside for lanterns, half shall go to a workshop on the sponsor'
       <section class="note" id="honest-note">
         <h2>An honest note: this is an early prototype</h2>
         <ul class="plain">
-          <li>The code runs locally (<code>python main.py</code>) and needs your own API key. The second-provider check is off unless you switch it on.</li>
+          <li>Model calls are not available from this page. The second-provider check is off unless someone running the demo switches it on.</li>
           <li>Language models can still misread legal text. A quote shows you where to look; it does not prove the summary is right. Always read the bill itself. This is not legal advice.</li>
           <li>The Avatar, bill-lifecycle, and chamber pages are a demo. The chamber is a synthetic population, not real voters.</li>
           <li>There are no adoption figures, endorsements, or accuracy scores on this page, because the project does not have them.</li>
@@ -176,27 +137,14 @@ Of the money set aside for lanterns, half shall go to a workshop on the sponsor'
 
       <section id="nonpartisan">
         <h2>Nonpartisan by design</h2>
-        <p>Avatar Democracy is not affiliated with, funded by, or run for any political party, candidate, or campaign. The analyzer's prompts tell it to avoid partisan framing and are published in the code for anyone to review. Any party may use the code under the MIT license, but none speaks for the project.</p>
-      </section>
-
-      <section id="critique">
-        <h2>Help us find what is broken</h2>
-        <p>If you study democratic institutions, machine-learning bias, verification, or law, or if you run participation programmes, send critique on <a href="https://github.com/spiry2s/avatar-democracy/issues">GitHub Issues</a>. Who can see that feedback depends on who can see the repository.</p>
+        <p>Avatar Democracy is not affiliated with, funded by, or run for any political party, candidate, or campaign. The analyzer is instructed to avoid partisan framing. No party speaks for the project.</p>
       </section>
     </div>
   </main>
   <footer>
     <div class="wrap">
-      <nav aria-label="Project">
-        <ul class="colophon">
-          <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/ai_avatar_democracy_v1.1.md">White paper v1.1</a></li>
-          <li><a href="https://github.com/spiry2s/avatar-democracy">Code</a></li>
-          <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/LICENSE">MIT License</a></li>
-          <li><a href="https://github.com/spiry2s/avatar-democracy/blob/main/sample_bill.txt">Fictional sample bill</a></li>
-        </ul>
-      </nav>
+      <p>Avatar Democracy. This demo is closed.</p>
     </div>
   </footer>
-  <script src="/landing/illustration.js"></script>
 </body>
 </html>

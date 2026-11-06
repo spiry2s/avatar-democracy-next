@@ -290,8 +290,8 @@ def test_failure_pages_and_api_errors_do_not_leak_a_reason(monkeypatch):
         assert word not in page.text.lower()
     assert expired.token not in page.text
     assert revoked.token not in page.text
-    assert page.text.lower().count("<script") == 1
-    assert 'src="/landing/illustration.js"' in page.text
+    assert "<script" not in page.text.lower()
+    assert "github.com" not in page.text.lower()
     assert "javascript:" not in page.text.lower()
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert page.headers["cache-control"] == "no-store"
@@ -360,22 +360,27 @@ def test_invite_alias_and_token_on_another_path_does_not_sign_in(monkeypatch):
     assert "set-cookie" not in both.headers
 
 
-def test_static_assets_skip_the_cookie_and_pages_do_not(monkeypatch, client):
+def test_app_source_requires_the_cookie_and_pages_do_not_load_without_it(monkeypatch, client):
     _enable(monkeypatch)
     for path in ("/static/api.js", "/static/style.css", "/manifest.webmanifest", "/sw.js"):
         response = client.get(path)
-        assert response.status_code == 200, path
-        assert "default-src 'self'" in response.headers["content-security-policy"]
+        assert response.status_code == 403, path
+        assert "function" not in response.text
     assert client.get("/analyze").status_code == 403
     assert client.get("/api/health").status_code == 403
     blocked = main.guard_api_request(
         Request(_scope("GET", "/static/../.env", [(b"host", b"127.0.0.1:8000")]))
     )
     assert blocked is not None and blocked.status_code == 403
-    allowed = main.guard_api_request(
+    also = main.guard_api_request(
         Request(_scope("GET", "/static/api.js", [(b"host", b"127.0.0.1:8000")]))
     )
-    assert allowed is None
+    assert also is not None and also.status_code == 403
+    issued = invites.create_invite(label="ada")
+    assert _redeem(client, issued).status_code == 303
+    opened = client.get("/static/api.js")
+    assert opened.status_code == 200
+    assert "default-src 'self'" in opened.headers["content-security-policy"]
 
 
 def test_duplicate_cookie_is_rejected(monkeypatch):

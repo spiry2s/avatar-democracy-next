@@ -149,6 +149,40 @@ def test_invites_do_not_share_a_compass(monkeypatch, tmp_path):
     assert ada_client.get("/api/profile").json()["profile"]["questionnaire_answers"] == {}
 
 
+def test_revoked_session_blocks_apis_and_bills_stay_shared(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    bills_dir = tmp_path / "bills"
+    monkeypatch.setattr(main.bills_mod, "BILLS_DIR", bills_dir)
+    ada = invites.create_invite(label="ada")
+    bea = invites.create_invite(label="bea")
+    ada_client = _client()
+    bea_client = _client()
+    _redeem(ada_client, ada)
+    _redeem(bea_client, bea)
+    saved = ada_client.post("/api/profile", json={
+        "questionnaire_answers": {"econ_1": -1},
+        "values": "Ada private values",
+    })
+    assert saved.status_code == 200
+    drafted = ada_client.post("/api/bills", json={
+        "title": "SHARED-DRAFT",
+        "text": "A draft every invited tester can read.",
+    })
+    assert drafted.status_code == 200
+    shared = bea_client.get("/api/bills")
+    assert shared.status_code == 200
+    assert "SHARED-DRAFT" in shared.text
+    assert "Ada private values" not in shared.text
+    assert bea_client.get("/api/profile").json()["profile"] is None
+    assert "Ada private values" not in bea_client.get("/api/audit").text
+    invites.revoke_invite(ada.invite.id)
+    for path in ("/api/profile", "/api/bills", "/api/audit", "/api/health", "/api/questionnaire"):
+        blocked = ada_client.get(path)
+        assert blocked.status_code == 403, path
+        assert "Ada private values" not in blocked.text
+        assert "SHARED-DRAFT" not in blocked.text
+
+
 def test_compass_page_and_api_stay_behind_the_invite(monkeypatch):
     _enable(monkeypatch)
     stranger = _client()

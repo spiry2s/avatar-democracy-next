@@ -773,11 +773,6 @@ def landing_style() -> FileResponse:
     return _landing_asset("style.css", "text/css; charset=utf-8")
 
 
-@app.get("/landing/illustration.js", include_in_schema=False)
-def landing_script() -> FileResponse:
-    return _landing_asset("illustration.js", "application/javascript")
-
-
 @app.get("/landing/favicon.svg", include_in_schema=False)
 def landing_icon() -> FileResponse:
     return _landing_asset("favicon.svg", "image/svg+xml")

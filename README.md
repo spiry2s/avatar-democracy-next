@@ -61,6 +61,10 @@ From the repository root:
 python main.py
 ```
 
+That is the supported start command. It does not create invites. With `AVATAR_INVITE_MODE=1` it loads whatever store is already in `AVATAR_INVITE_DATA_DIR`. A restart keeps those invites: the cookie name, the HMAC, and the SQLite file are unchanged. New invites are created only by `python -m backend.invites create`, which writes that same store and prints a link once.
+
+`railway_bootstrap_mint.py` is not in this repository, and no build step in the repo adds it. A host whose start command is `python railway_bootstrap_mint.py && python main.py` will fail on a build taken from this tree. The running host did run that prefix once: its logs show `BOOTSTRAP_INVITES_BEGIN`, a write under `/data`, then `BOOTSTRAP_INVITES_END`, and then this app. `python main.py` does not repeat that write. Replacing the host start command with `python main.py` is an operator change. This repository does not set it. Leave `AVATAR_INVITE_DATA_DIR`, `AVATAR_INVITE_MODE`, `HOST`, `PORT`, and `APP_ACCESS_TOKEN` as they are. On the current host the invite directory is `/data`, which is the persisted volume.
+
 The same app can be started with Uvicorn directly:
 
 ```bash
@@ -114,7 +118,7 @@ AVATAR_INVITE_MODE=1 python main.py
 
 `create` prints a link like `http://127.0.0.1:8000/?token=...` once. The token is `secrets.token_urlsafe(32)` (32 bytes from the operating system). The server stores only an HMAC-SHA256 of it, plus a label, `created_at`, `expires_at`, a revoked flag, budgets, and usage counters. The store is `invites.sqlite` under `AVATAR_INVITE_DATA_DIR` (default `data/`, gitignored), next to `invite-hmac.key`. A path that contains `..`, or a relative path that resolves outside the project through a symlink, is rejected.
 
-Opening the link sets an `HttpOnly` cookie named `avatar_invite`, `SameSite=Strict`, and `Secure` when the request is https. A valid token redirects to the same path without `token`, and that next page is the prototype. With invite mode on, `GET /` with no cookie is the public landing page in `landing/`. It does not open the prototype. A presented token that does not match is refused with the same page and no reason: the prototype is not served and the cookie is not set. `/landing/style.css`, `/landing/illustration.js`, and `/landing/favicon.svg` load without a cookie. Static files under `/static/` other than HTML, the manifest, and `sw.js` load without the cookie. Every other page and every `/api` route requires a valid invite. A LAN access token does not take the place of an invite. `python -m backend.invites` is the only admin interface. It is not mounted on the app. There is no invite route that creates, lists, or revokes tokens.
+Opening the link sets an `HttpOnly` cookie named `avatar_invite`, `SameSite=Strict`, and `Secure` when the request is https. A valid token redirects to the same path without `token`, and that next page is the prototype. With invite mode on, `GET /` with no cookie is the public landing page in `landing/`. It does not open the prototype. A presented token that does not match is refused with the same page and no reason: the prototype is not served and the cookie is not set. `/landing/style.css` and `/landing/favicon.svg` load without a cookie. The application pages, `/static/`, the manifest, `sw.js`, and every `/api` route require a valid invite. A LAN access token does not take the place of an invite. `python -m backend.invites` is the only admin interface. It is not mounted on the app. There is no invite route that creates, lists, or revokes tokens.
 
 With invite mode on, the compass, values, delegates, and the audit log of those actions are stored per invite under the invite data directory (`profiles/` and `audits/`). They are not written to the shared `data/profile.json`. With invite mode off, the prototype still uses that one local profile. Bill drafts stay in the shared bill store either way.
 

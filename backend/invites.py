@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import quote, urlsplit, urlencode
+from urllib.parse import quote, unquote, urlsplit, urlencode
 
 # 32 bytes from the OS CSPRNG. token_urlsafe encodes that; it is not 32 characters.
 TOKEN_BYTES = 32
@@ -796,43 +796,34 @@ def authenticate_cookie(request: Any) -> Invite | None:
 # Exact public files for the landing page. Not a directory mount.
 PUBLIC_LANDING_ASSETS = frozenset({
     "/landing/style.css",
-    "/landing/illustration.js",
     "/landing/favicon.svg",
 })
-_BLOCKED_STATIC_SUFFIXES = (
-    ".html",
-    ".htm",
-    ".md",
-    ".markdown",
-    ".py",
-    ".env",
-    ".sqlite",
-    ".jsonl",
-)
+def _decoded_path(path: str) -> str:
+    """Decode percent-encoding twice so ``%2e%2e`` and ``%252e%252e`` cannot skip the ``..`` check."""
+    decoded = path
+    for _ in range(2):
+        nxt = unquote(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+    return decoded
 
 
-def _static_path(path: str) -> bool:
-    if path in {"/manifest.webmanifest", "/sw.js"}:
-        return True
-    if path != "/static" and not path.startswith("/static/"):
-        return False
-    if ".." in path or "\\" in path or "\x00" in path:
-        return False
-    lowered = path.lower()
-    if lowered.endswith(_BLOCKED_STATIC_SUFFIXES):
-        return False
-    return True
+def _rejects_traversal(path: str) -> bool:
+    decoded = _decoded_path(path)
+    return ".." in decoded or "\\" in decoded or "\x00" in decoded
 
 
 def request_is_exempt(method: str, path: str) -> bool:
     """Static shell, the public landing, and the token landing do not require a cookie.
 
     ``/`` is exempt so the route can show the public page or the prototype.
-    Analyzer HTML under ``/static/`` is not exempt.
+    Application files under ``/static/``, the manifest, and ``sw.js`` are not exempt.
+    Encoded ``..`` is not exempt.
     """
+    if _rejects_traversal(path):
+        return False
     if method in {"GET", "HEAD"} and path in PUBLIC_LANDING_ASSETS:
-        return True
-    if _static_path(path):
         return True
     if method in {"GET", "HEAD"} and path in {"/", "/invite"}:
         return True
