@@ -22,6 +22,7 @@ It does not replace the LAN token, the Host allowlist, or the Origin check.
 
 from __future__ import annotations
 
+import functools
 import hmac
 import os
 import sqlite3
@@ -119,6 +120,34 @@ bind_host = "127.0.0.1"
 bind_port = 8000
 
 _rate_lock = threading.Lock()
+
+# API handlers are plain `def` so FastAPI runs them in a worker thread and a
+# minutes-long model call does not stall other requests. Read-modify-write on
+# the JSON stores is serialized here instead. A fixed set of striped locks
+# keeps memory bounded however many bill ids clients send.
+_STATE_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _state_lock(key: str) -> threading.Lock:
+    return _STATE_LOCKS[hash(key) % len(_STATE_LOCKS)]
+
+
+def _serialized(key_of):
+    """Run the handler while holding the lock for ``key_of(kwargs)``."""
+
+    def decorate(handler):
+        @functools.wraps(handler)
+        def wrapper(*args, **kwargs):
+            with _state_lock(key_of(kwargs)):
+                return handler(*args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
+_profile_serialized = _serialized(lambda kwargs: "profile")
+_bill_serialized = _serialized(lambda kwargs: f"bill:{kwargs.get('bill_id')}")
 _rate_hits: OrderedDict[str, list[float]] = OrderedDict()
 
 
@@ -887,7 +916,7 @@ async def service_worker() -> FileResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict:
+def health() -> dict:
     """Health check. Reports whether the configured LLM provider has a credential.
 
     With the default Anthropic provider this is whether ANTHROPIC_API_KEY is set.
@@ -908,7 +937,7 @@ async def health() -> dict:
 
 
 @app.post("/api/analyze")
-async def analyze(
+def analyze(
     text: Optional[str] = Form(None),
     url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
@@ -951,7 +980,7 @@ async def analyze(
         elif url:
             bill_text = extractors.extract_text(url, source_type="url")
         elif file:
-            content = await file.read()
+            content = file.file.read()
             bill_text = extractors.extract_text(content, source_type="pdf")
         else:
             # Should never reach here due to checks above
@@ -1026,20 +1055,21 @@ class DelegateRequest(BaseModel):
 
 
 @app.get("/api/questionnaire")
-async def get_questionnaire() -> dict:
+def get_questionnaire() -> dict:
     """The seeding questionnaire (statements + scale + axis labels)."""
     return questionnaire.public_questionnaire()
 
 
 @app.get("/api/profile")
-async def get_profile() -> JSONResponse:
+def get_profile() -> JSONResponse:
     """Return the stored profile, or null if none configured yet."""
     p = profile_mod.load_profile()
     return JSONResponse(content={"profile": p.to_dict() if p else None})
 
 
 @app.post("/api/profile")
-async def put_profile(req: ProfileRequest) -> JSONResponse:
+@_profile_serialized
+def put_profile(req: ProfileRequest) -> JSONResponse:
     """
     Create or update the citizen's compass and values. Delegates are managed
     separately (they have asymmetric rate-limits). Preserves existing delegates.
@@ -1065,7 +1095,8 @@ async def put_profile(req: ProfileRequest) -> JSONResponse:
 
 
 @app.post("/api/profile/delegates")
-async def add_delegate(req: DelegateRequest) -> JSONResponse:
+@_profile_serialized
+def add_delegate(req: DelegateRequest) -> JSONResponse:
     """Add/replace a per-issue delegate. Enters cooling-off before it's followed."""
     p = profile_mod.load_profile()
     if p is None:
@@ -1086,7 +1117,8 @@ async def add_delegate(req: DelegateRequest) -> JSONResponse:
 
 
 @app.delete("/api/profile/delegates/{issue_area}")
-async def revoke_delegate(issue_area: str) -> JSONResponse:
+@_profile_serialized
+def revoke_delegate(issue_area: str) -> JSONResponse:
     """Revoke a per-issue delegate immediately."""
     p = profile_mod.load_profile()
     if p is None:
@@ -1106,7 +1138,8 @@ class SourceRequest(BaseModel):
 
 
 @app.post("/api/profile/delegates/{issue_area}/sources")
-async def add_delegate_source(issue_area: str, req: SourceRequest) -> JSONResponse:
+@_profile_serialized
+def add_delegate_source(issue_area: str, req: SourceRequest) -> JSONResponse:
     """Attach a recorded position to a delegate (grounds the Avatar in evidence)."""
     p = profile_mod.load_profile()
     if p is None:
@@ -1123,7 +1156,8 @@ async def add_delegate_source(issue_area: str, req: SourceRequest) -> JSONRespon
 
 
 @app.delete("/api/profile/delegates/{issue_area}/sources/{source_id}")
-async def remove_delegate_source(issue_area: str, source_id: str) -> JSONResponse:
+@_profile_serialized
+def remove_delegate_source(issue_area: str, source_id: str) -> JSONResponse:
     p = profile_mod.load_profile()
     if p is None:
         raise HTTPException(status_code=400, detail="No profile configured.")
@@ -1154,7 +1188,7 @@ class OverrideRequest(BaseModel):
 
 
 @app.post("/api/avatar/vote")
-async def avatar_vote(req: VoteRequest) -> JSONResponse:
+def avatar_vote(req: VoteRequest) -> JSONResponse:
     """Cast the citizen's Avatar vote on a bill analysis.
 
     The body is the analysis JSON only. This route does not fetch a bill and
@@ -1208,7 +1242,7 @@ async def avatar_vote(req: VoteRequest) -> JSONResponse:
 
 
 @app.post("/api/avatar/override")
-async def avatar_override(req: OverrideRequest) -> JSONResponse:
+def avatar_override(req: OverrideRequest) -> JSONResponse:
     """Record a citizen override of an Avatar section vote."""
     audit.log_event("vote_overridden", {
         "bill_title": req.bill_title,
@@ -1220,7 +1254,7 @@ async def avatar_override(req: OverrideRequest) -> JSONResponse:
 
 
 @app.get("/api/audit")
-async def get_audit(limit: int = 200) -> JSONResponse:
+def get_audit(limit: int = 200) -> JSONResponse:
     """Return the audit log, newest first."""
     return JSONResponse(content={"events": audit.read_events(limit=limit)})
 
@@ -1252,13 +1286,14 @@ def _persist_refresh(bill: bills_mod.Bill) -> bills_mod.Bill:
 
 
 @app.get("/api/bills")
-async def list_bills() -> JSONResponse:
+def list_bills() -> JSONResponse:
     out = [_persist_refresh(b).to_dict() for b in bills_mod.list_bills()]
     return JSONResponse(content={"bills": out})
 
 
 @app.get("/api/bills/{bill_id}")
-async def get_bill(bill_id: str) -> JSONResponse:
+@_bill_serialized
+def get_bill(bill_id: str) -> JSONResponse:
     bill = bills_mod.load_bill(bill_id)
     if bill is None:
         raise HTTPException(status_code=404, detail="Bill not found")
@@ -1266,7 +1301,7 @@ async def get_bill(bill_id: str) -> JSONResponse:
 
 
 @app.post("/api/bills")
-async def propose_bill(req: ProposeRequest) -> JSONResponse:
+def propose_bill(req: ProposeRequest) -> JSONResponse:
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Bill text is required")
     bill = bills_mod.propose(req.title, req.text, req.scope, emergency=req.emergency)
@@ -1278,7 +1313,8 @@ async def propose_bill(req: ProposeRequest) -> JSONResponse:
 
 
 @app.post("/api/bills/{bill_id}/versions")
-async def add_bill_version(bill_id: str, req: VersionRequest) -> JSONResponse:
+@_bill_serialized
+def add_bill_version(bill_id: str, req: VersionRequest) -> JSONResponse:
     bill = bills_mod.load_bill(bill_id)
     if bill is None:
         raise HTTPException(status_code=404, detail="Bill not found")
@@ -1291,7 +1327,8 @@ async def add_bill_version(bill_id: str, req: VersionRequest) -> JSONResponse:
 
 
 @app.post("/api/bills/{bill_id}/open")
-async def open_bill(bill_id: str) -> JSONResponse:
+@_bill_serialized
+def open_bill(bill_id: str) -> JSONResponse:
     bill = bills_mod.load_bill(bill_id)
     if bill is None:
         raise HTTPException(status_code=404, detail="Bill not found")
@@ -1334,7 +1371,8 @@ def _freeze_and_analyze(bill: bills_mod.Bill) -> None:
 
 
 @app.post("/api/bills/{bill_id}/endorse")
-async def endorse_bill(bill_id: str) -> JSONResponse:
+@_bill_serialized
+def endorse_bill(bill_id: str) -> JSONResponse:
     bill = bills_mod.load_bill(bill_id)
     if bill is None:
         raise HTTPException(status_code=404, detail="Bill not found")
@@ -1351,7 +1389,8 @@ async def endorse_bill(bill_id: str) -> JSONResponse:
 
 
 @app.delete("/api/bills/{bill_id}/endorse")
-async def revoke_bill_endorsement(bill_id: str) -> JSONResponse:
+@_bill_serialized
+def revoke_bill_endorsement(bill_id: str) -> JSONResponse:
     bill = bills_mod.load_bill(bill_id)
     if bill is None:
         raise HTTPException(status_code=404, detail="Bill not found")
@@ -1363,7 +1402,8 @@ async def revoke_bill_endorsement(bill_id: str) -> JSONResponse:
 
 
 @app.post("/api/bills/{bill_id}/simulate-endorsements")
-async def simulate_endorsements(bill_id: str, req: SimulateRequest) -> JSONResponse:
+@_bill_serialized
+def simulate_endorsements(bill_id: str, req: SimulateRequest) -> JSONResponse:
     """Demo scaffold: add N simulated endorsements so thresholds are reachable
     with one human. The Proxy Chamber phase replaces this with real Avatars."""
     bill = bills_mod.load_bill(bill_id)
@@ -1380,7 +1420,8 @@ async def simulate_endorsements(bill_id: str, req: SimulateRequest) -> JSONRespo
 
 
 @app.post("/api/bills/{bill_id}/vote")
-async def vote_on_bill(bill_id: str) -> JSONResponse:
+@_bill_serialized
+def vote_on_bill(bill_id: str) -> JSONResponse:
     bill = bills_mod.load_bill(bill_id)
     if bill is None:
         raise HTTPException(status_code=404, detail="Bill not found")
@@ -1456,13 +1497,13 @@ class RegeneratePopulationRequest(BaseModel):
 
 
 @app.get("/api/population")
-async def get_population() -> JSONResponse:
+def get_population() -> JSONResponse:
     """Synthetic population: size, archetypes, per-axis means, and compasses."""
     return JSONResponse(content=population.distribution())
 
 
 @app.post("/api/population/regenerate")
-async def regenerate_population(req: RegeneratePopulationRequest) -> JSONResponse:
+def regenerate_population(req: RegeneratePopulationRequest) -> JSONResponse:
     citizens = population.generate_population(req.size)
     audit.log_event("population_generated", {"size": len(citizens)})
     return JSONResponse(content=population.distribution(citizens))
