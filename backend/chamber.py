@@ -18,7 +18,7 @@ from typing import Any
 
 from backend import llm
 from backend.config import CHAMBER_VOTE_TAU
-from backend.grounding import downstream_sections, prompt_title
+from backend.grounding import downstream_sections, prompt_title, same_section
 from backend.questionnaire import AXES
 
 AXIS_NAMES = list(AXES.keys())
@@ -59,35 +59,39 @@ def aggregate(
     Pure: takes pre-computed section_tags, returns tallies in compute_result shape.
     """
     op_positions: dict[str, str] = {}
-    op_needs_review: set[str] = set()
+    op_needs_review: dict[str, bool] = {}
     if operator_vote:
         for sv in operator_vote.get("section_votes", []):
             sid_key = str(sv.get("section_id"))
             op_positions[sid_key] = sv.get("position", "abstain")
-            if sv.get("needs_human_review") and sv.get("position") in ("yes", "no"):
-                op_needs_review.add(sid_key)
+            op_needs_review[sid_key] = bool(
+                sv.get("needs_human_review") and sv.get("position") in ("yes", "no")
+            )
 
     tallies = []
     for section in analysis.get("sections", []):
         sid = str(section.get("section_id", "?"))
-        tag = section_tags.get(sid, {})
+        # The tags and the operator's vote come from separate model calls that
+        # may format the id differently ("Sec. 101" vs "101"). An exact-only
+        # lookup silently made the whole population abstain on that section.
+        tag = section_lookup(section_tags, sid)
         counts = {"yes": 0, "no": 0, "abstain": 0, "needs_human_review": 0}
         by_archetype: dict[str, dict[str, int]] = {}  # aggregate blocs (privacy-safe; never per-citizen)
 
         # operator's real Avatar (full-engine vote). A yes or no that still
         # needs human review is not an automatic yes or no.
         if operator_vote is not None:
-            if sid in op_needs_review:
+            if section_lookup(op_needs_review, sid, False):
                 counts["needs_human_review"] += 1
             else:
-                position = op_positions.get(sid, "abstain")
+                position = str(section_lookup(op_positions, sid, "abstain") or "").strip().lower()
                 if position not in ("yes", "no", "abstain"):
                     position = "abstain"
                 counts[position] += 1
 
         # synthetic population (deterministic), tallied by archetype bloc
         for citizen in population:
-            v = deterministic_vote(citizen.get("compass", {}), tag, tau)
+            v = deterministic_vote(citizen.get("compass", {}), tag or {}, tau)
             counts[v] += 1
             bucket = by_archetype.setdefault(
                 citizen.get("archetype", "?"), {"yes": 0, "no": 0, "abstain": 0}
@@ -102,8 +106,33 @@ def aggregate(
             "abstain": counts["abstain"],
             "needs_human_review": counts["needs_human_review"],
             "by_archetype": by_archetype,
+            "tagged": tag is not None,
         })
     return tallies
+
+
+def section_lookup(mapping: dict[str, Any], section_id: str, default: Any = None) -> Any:
+    """Value for ``section_id``: exact key first, then the same section in another format."""
+    if section_id in mapping:
+        return mapping[section_id]
+    for key, value in mapping.items():
+        if same_section(str(key), section_id):
+            return value
+    return default
+
+
+def missing_tags(analysis: dict[str, Any], section_tags: dict[str, dict[str, float]]) -> list[str]:
+    """Voteable sections the tagger returned no tag for.
+
+    Without a tag every synthetic citizen abstains, so the operator alone would
+    decide the section. Callers must not record a result while this is non-empty.
+    Sections withheld for grounding are not sent for tagging and are not listed.
+    """
+    return [
+        str(section.get("section_id", "?"))
+        for section in downstream_sections(analysis)
+        if section_lookup(section_tags, str(section.get("section_id", "?"))) is None
+    ]
 
 
 # ── section axis-tagging (one LLM call) ───────────────────────────────────────
