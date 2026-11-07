@@ -1416,6 +1416,19 @@ async def vote_on_bill(bill_id: str) -> JSONResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Vote failed: {e}") from e
 
+    untagged = chamber.missing_tags(bill.analysis, tags)
+    if untagged:
+        # The population would abstain on these and the operator alone would
+        # decide them. Record nothing; the bill stays open for voting.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "The chamber could not tag section(s) "
+                + ", ".join(untagged)
+                + ". No result was recorded. Try the vote again."
+            ),
+        )
+
     bill.result = bills_mod.compute_result(tallies, config.SECTION_PASSAGE_RATIO)
     bill.result["population_size"] = len(pop) + 1  # + the operator
     bill.result["section_tags"] = tags
