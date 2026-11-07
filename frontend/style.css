@@ -1687,3 +1687,9 @@ table {
 }
 
 .sw-update:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.blocked-reason {
+  border-left: 4px solid var(--red, #c0392b);
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+}

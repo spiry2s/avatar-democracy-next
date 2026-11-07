@@ -252,26 +252,44 @@ def compute_result(section_tallies: list[dict[str, Any]], ratio: float) -> dict[
     """A section passes if yes/(yes+no) >= ratio. A section with no decisive votes
     (everyone abstained — e.g. a short title or findings) is "no contest" and does
     NOT block the bill. The bill passes only if every CONTESTED section passes
-    (per-section voting; no Christmas-tree bills)."""
+    (per-section voting; no Christmas-tree bills).
+
+    A section marked ``withheld`` (its quote could not be verified, so nobody
+    was allowed to vote on it) is not "no contest": it blocks the bill. An
+    unverified section must not become law without a vote.
+    """
     sections = []
     passed_count = 0
     contested = 0
+    withheld: list[str] = []
     for t in section_tallies:
         decisive = t["yes"] + t["no"]
-        is_contested = decisive > 0
+        is_withheld = bool(t.get("withheld"))
+        is_contested = decisive > 0 and not is_withheld
         passed = is_contested and (t["yes"] / decisive) >= ratio
         if is_contested:
             contested += 1
         if passed:
             passed_count += 1
+        if is_withheld:
+            withheld.append(str(t.get("section_id", "?")))
         sections.append({**t, "passed": passed, "contested": is_contested})
-    return {
+    result = {
         "per_section": sections,
         "sections_passed": passed_count,
         "sections_total": len(sections),
         "sections_contested": contested,
-        "passed": contested > 0 and passed_count == contested,
+        "sections_withheld": withheld,
+        "passed": not withheld and contested > 0 and passed_count == contested,
     }
+    if withheld:
+        result["blocked_reason"] = (
+            "Not passed: section(s) "
+            + ", ".join(withheld)
+            + " could not be verified against the bill text, so nobody voted on them. "
+            "An unverified section cannot become law. Re-analyze or amend the bill."
+        )
+    return result
 
 
 # ── persistence ──────────────────────────────────────────────────────────────
