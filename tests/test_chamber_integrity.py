@@ -124,3 +124,46 @@ def test_vote_with_reformatted_tag_ids_counts_the_population(voting_bill, monkey
     assert response.status_code == 200, response.text
     for section in response.json()["bill"]["result"]["per_section"]:
         assert section["yes"] == 201, section
+
+
+# ── issue #2: unverified sections must not pass without a vote ───────────────
+
+
+def test_unverified_section_blocks_the_bill():
+    analysis = {"sections": [
+        {"section_id": "Sec. 1", "heading": "Popular"},
+        {"section_id": "Sec. 2", "heading": "Unverified rider", "grounded": False},
+    ]}
+    operator = {"section_votes": [
+        {"section_id": "Sec. 1", "position": "yes"},
+        {"section_id": "Sec. 2", "position": "abstain", "grounding_block": True},
+    ]}
+    tallies = chamber.aggregate(analysis, operator, POP, {"Sec. 1": {"liberty": 0.9}}, tau=0.12)
+    result = bills_mod.compute_result(tallies, 0.5)
+
+    assert result["passed"] is False
+    assert result["sections_withheld"] == ["Sec. 2"]
+    assert "Sec. 2" in result["blocked_reason"]
+    rider = next(s for s in result["per_section"] if s["section_id"] == "Sec. 2")
+    assert rider["withheld"] is True and rider["contested"] is False
+
+
+def test_genuine_no_contest_section_still_does_not_block():
+    tallies = [
+        {"section_id": "a", "heading": "", "yes": 5, "no": 0, "abstain": 0},
+        {"section_id": "title", "heading": "", "yes": 0, "no": 0, "abstain": 5},
+    ]
+    result = bills_mod.compute_result(tallies, 0.5)
+    assert result["passed"] is True
+    assert result["sections_withheld"] == []
+    assert "blocked_reason" not in result
+
+
+def test_withheld_section_with_stray_votes_still_blocks():
+    tallies = [
+        {"section_id": "a", "heading": "", "yes": 5, "no": 0, "abstain": 0},
+        {"section_id": "b", "heading": "", "yes": 3, "no": 0, "abstain": 0, "withheld": True},
+    ]
+    result = bills_mod.compute_result(tallies, 0.5)
+    assert result["passed"] is False
+    assert result["sections_contested"] == 1

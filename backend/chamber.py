@@ -107,6 +107,9 @@ def aggregate(
             "needs_human_review": counts["needs_human_review"],
             "by_archetype": by_archetype,
             "tagged": tag is not None,
+            # Withheld for grounding: not sent for tagging and the operator must
+            # abstain, so nobody votes on it. compute_result blocks the bill.
+            "withheld": section.get("grounded") is False,
         })
     return tallies
 

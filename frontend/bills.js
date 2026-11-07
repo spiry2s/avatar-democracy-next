@@ -284,10 +284,13 @@ function resultPanel(b) {
   const sections = (r.per_section || []).map(t => {
     const sv = (v.section_votes || []).find(x => x.section_id === t.section_id) || {};
     const pos = (sv.position || 'abstain').toLowerCase();
-    const noContest = t.contested === false;
-    const passBadge = noContest
-      ? `<span class="sig-badge sig-medium">no contest</span>`
-      : `<span class="sig-badge ${passedClass(t.passed)}">${t.passed ? 'section passes' : 'section fails'}</span>`;
+    const withheld = t.withheld === true;
+    const noContest = t.contested === false && !withheld;
+    const passBadge = withheld
+      ? `<span class="sig-badge sig-high">unverified — blocks the bill</span>`
+      : noContest
+        ? `<span class="sig-badge sig-medium">no contest</span>`
+        : `<span class="sig-badge ${passedClass(t.passed)}">${t.passed ? 'section passes' : 'section fails'}</span>`;
     return `<div class="vote-item ${voteOutcomeClass(noContest, t.passed)}">
       <div class="vote-header">
         <span class="section-id">${escHtml(t.section_id)}</span>
@@ -312,6 +315,7 @@ function resultPanel(b) {
     </div>
     <div class="result-card-body">
       <p><strong>${r.sections_passed} of ${r.sections_contested ?? r.sections_total} contested sections passed</strong>${pop ? ` across a Proxy Chamber of ${pop.toLocaleString()} Avatars` : ''}. A bill passes only if every contested section passes (no Christmas-tree bills); procedural sections everyone abstains on are "no contest".</p>
+      ${r.blocked_reason ? `<p class="blocked-reason"><strong>⚠ ${escHtml(r.blocked_reason)}</strong></p>` : ''}
       ${v.recommendation ? `<p class="muted">Your Avatar's view: ${escHtml(v.recommendation)}</p>` : ''}
       ${tensionHtml}
     </div>
