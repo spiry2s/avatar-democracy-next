@@ -315,6 +315,7 @@ function resultPanel(b) {
     </div>
     <div class="result-card-body">
       <p><strong>${r.sections_passed} of ${r.sections_contested ?? r.sections_total} contested sections passed</strong>${pop ? ` across a Proxy Chamber of ${pop.toLocaleString()} Avatars` : ''}. A bill passes only if every contested section passes (no Christmas-tree bills); procedural sections everyone abstains on are "no contest".</p>
+      ${(v.checks_unavailable || []).length ? `<p class="muted">⚠ Some safety checks did not run (${escHtml(v.checks_unavailable.join(', '))}). Treat your Avatar's vote as unchecked.</p>` : ''}
       ${r.blocked_reason ? `<p class="blocked-reason"><strong>⚠ ${escHtml(r.blocked_reason)}</strong></p>` : ''}
       ${v.recommendation ? `<p class="muted">Your Avatar's view: ${escHtml(v.recommendation)}</p>` : ''}
       ${tensionHtml}

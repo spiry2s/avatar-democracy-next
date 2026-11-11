@@ -747,7 +747,9 @@ def test_cast_vote_applies_abstain_and_filters_would_pass(monkeypatch):
     assert held.comparison_prior_position == "yes"
     assert held.comparison_abstained is True
     assert result.section_votes[1].position == "yes"
-    assert result.would_pass_sections == ["Sec. 101"]
+    # Derived from the final positions (issue #9), not the model's own list,
+    # which named "Sec. 101", a section that is not in the vote at all.
+    assert result.would_pass_sections == ["s2"]
     assert len(fake.calls) == 1
 
 
@@ -764,7 +766,8 @@ def test_cast_vote_without_comparison_keeps_the_model_position(monkeypatch):
     assert result.section_votes[0].position == "no"
     assert result.section_votes[0].comparison_abstained is False
     assert result.section_votes[0].needs_human_review is False
-    assert result.would_pass_sections == ["s1", "Sec. 101"]
+    # s1 was voted no, so it cannot be in the would-pass list (issue #9).
+    assert result.would_pass_sections == ["s2"]
 
 
 # ── orchestration: same prompt, missing key, API shape ───────────────────────

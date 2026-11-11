@@ -371,6 +371,12 @@ function renderVoteBanner(vote) {
   if (excerptNote && !vote.truncation_blocking) {
     parts.push(`<div class="grounding-banner warning">${escHtml(excerptNote)}</div>`);
   }
+  const unchecked = Array.isArray(vote.checks_unavailable) ? vote.checks_unavailable : [];
+  if (unchecked.length) {
+    const names = {cross_check: 'the second-model check', delegate_drift: 'the delegate-drift check'};
+    const list = unchecked.map(c => escHtml(names[String(c).split(':')[0]] || String(c))).join(', ');
+    parts.push(`<div class="grounding-banner warning"><strong>Some safety checks did not run:</strong> ${list}. Treat this vote as unchecked.</div>`);
+  }
   const votes = vote.section_votes || [];
   const unverified = votes.length > 0 && votes.every(v => v.basis === 'unverified');
   if (vote.truncation_blocking || unverified) {

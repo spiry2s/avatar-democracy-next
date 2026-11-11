@@ -17,8 +17,9 @@ decides how the citizen would want to vote.
 
 from __future__ import annotations
 
+import logging
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any
 
 from backend import comparison, llm, questionnaire
@@ -37,6 +38,11 @@ from backend.grounding import (
     withheld_payload,
 )
 from backend.profile import CitizenProfile
+
+log = logging.getLogger(__name__)
+
+_POSITIONS = ("yes", "no", "abstain")
+_CONFIDENCE = ("high", "medium", "low")
 
 
 @dataclass
@@ -68,6 +74,9 @@ class AvatarVote:
     withheld_ungrounded: dict[str, Any] | None = None
     truncation_blocking: bool = False
     blocking_reason: str = ""
+    # Capture-defense checks that could not run, e.g. "cross_check: TimeoutError".
+    # Empty means every enabled check ran.
+    checks_unavailable: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +89,7 @@ class AvatarVote:
             or {"sections": [], "high_severity_flags": []},
             "truncation_blocking": self.truncation_blocking,
             "blocking_reason": self.blocking_reason,
+            "checks_unavailable": list(self.checks_unavailable),
         }
 
 
@@ -330,6 +340,34 @@ Cast this citizen's vote on each section. Output ONLY this JSON object:
 """
 
 
+def _section_vote_from_model(raw: dict[str, Any]) -> SectionVote:
+    """A SectionVote from one model entry, with position and confidence normalized.
+
+    Anything other than yes, no, or abstain (after trimming and lowercasing)
+    counts as abstain, and the reasoning says what the model actually wrote.
+    """
+    said = str(raw.get("position", "") or "")
+    position = said.strip().lower()
+    reasoning = str(raw.get("reasoning", "") or "")
+    confidence = str(raw.get("confidence", "") or "").strip().lower()
+    if confidence not in _CONFIDENCE:
+        confidence = "low"
+    if position not in _POSITIONS:
+        shown = said.strip()[:40] or "nothing"
+        note = f"(The model answered {shown!r}, which is not yes, no, or abstain, so this counts as abstain.)"
+        reasoning = f"{reasoning} {note}".strip()
+        position = "abstain"
+        confidence = "low"
+    return SectionVote(
+        section_id=str(raw.get("section_id", "?")),
+        heading=str(raw.get("heading", "") or ""),
+        position=position,
+        basis=str(raw.get("basis", "compass") or "compass"),
+        reasoning=reasoning,
+        confidence=confidence,
+    )
+
+
 def _override_vote(vote: SectionVote, reason: str) -> None:
     if not vote.model_position:
         vote.model_position = vote.position
@@ -526,19 +564,10 @@ def cast_vote(
         error_prefix="Could not parse Avatar response as JSON",
     )
 
-    section_votes = [
-        SectionVote(
-            section_id=str(v.get("section_id", "?")),
-            heading=v.get("heading", ""),
-            position=v.get("position", "abstain"),
-            basis=v.get("basis", "compass"),
-            reasoning=v.get("reasoning", ""),
-            confidence=v.get("confidence", "low"),
-        )
-        for v in data.get("section_votes", [])
-    ]
+    section_votes = [_section_vote_from_model(v) for v in data.get("section_votes", []) if isinstance(v, dict)]
     section_votes = _apply_grounding_blocks(analysis, section_votes)
     open_votes = [sv for sv in section_votes if not sv.grounding_block]
+    checks_unavailable: list[str] = []
 
     # Second Claude pass: the checker role re-reads the vote. By default that
     # role is another Anthropic model, not a different vendor. Best-effort — a
@@ -553,8 +582,10 @@ def cast_vote(
                 if sv.section_id in diverged:
                     sv.divergent = True
                     sv.confidence = "low"
-        except Exception:
-            pass
+        except Exception as exc:
+            # The vote still stands, but it must not look checked when it was not.
+            log.warning("checker pass failed: %s", type(exc).__name__)
+            checks_unavailable.append(f"cross_check: {type(exc).__name__}")
 
     # Capture defense: does a vote attributed to a grounded delegate actually match
     # that delegate's own recorded positions? Best-effort.
@@ -568,12 +599,12 @@ def cast_vote(
             for sv in open_votes:
                 if sv.section_id in drifted:
                     sv.delegate_drift = True
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("delegate drift check failed: %s", type(exc).__name__)
+            checks_unavailable.append(f"delegate_drift: {type(exc).__name__}")
 
     blocked = [sv for sv in section_votes if sv.grounding_block]
     recommendation = data.get("recommendation", "")
-    would = list(data.get("would_pass_sections") or [])
     blocking_reason = ""
     if blocked:
         blocking_reason = (
@@ -581,14 +612,17 @@ def cast_vote(
             "ungrounded or an ungrounded high-severity flag referred to them."
         )
         recommendation = blocking_reason + (" " + recommendation if recommendation else "")
-        blocked_ids = {sv.section_id for sv in blocked}
-        would = [sid for sid in would if sid not in blocked_ids]
 
     # Independent-family comparison. No-op unless the analysis carries
     # model_comparison. Runs after grounding abstentions, so a high-severity
     # disagreement still holds a section whose quotes checked out.
-    abstained_ids = comparison.apply_vote_policy(section_votes, analysis)
-    would = comparison.without_abstained(would, abstained_ids)
+    comparison.apply_vote_policy(section_votes, analysis)
+    # Derived from the final positions, after every block and policy, so it
+    # cannot disagree with the section votes the way the model's own list could.
+    would = [
+        sv.section_id for sv in section_votes
+        if sv.position == "yes" and not sv.needs_human_review
+    ]
 
     return AvatarVote(
         bill_title=analysis.get("title", "Untitled bill"),
@@ -599,6 +633,7 @@ def cast_vote(
         withheld_ungrounded=withheld_payload(analysis),
         truncation_blocking=False,
         blocking_reason=blocking_reason,
+        checks_unavailable=checks_unavailable,
     )
 
 
