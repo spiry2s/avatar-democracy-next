@@ -58,6 +58,7 @@ from backend import (
     profile as profile_mod,
     questionnaire,
     summarizer,
+    tenant,
     vote_analysis,
 )
 from backend.bill_fetch import BillSourceError
@@ -730,6 +731,7 @@ async def reject_untrusted_api_requests(request: Request, call_next):
     usage_token = llm.begin_request_usage()
     scope_token = None
     audit_token = None
+    tenant_token = None
     try:
         blocked = guard_api_request(request)
         if blocked is not None:
@@ -745,6 +747,9 @@ async def reject_untrusted_api_requests(request: Request, call_next):
                 return _with_security_headers(denied)
             scope_token = profile_mod.push_scope(record.id, root)
             audit_token = audit.push_scope(record.id, root)
+            # Bills stay shared between testers by design. Endorsements are
+            # recorded under each tester's own invite id, not one shared "local".
+            tenant_token = tenant.push_scope(record.id)
         response = await call_next(request)
         invites.record_request(request, response.status_code, response, llm.snapshot_request_usage())
         return _with_security_headers(response)
@@ -753,6 +758,8 @@ async def reject_untrusted_api_requests(request: Request, call_next):
             profile_mod.reset_scope(scope_token)
         if audit_token is not None:
             audit.reset_scope(audit_token)
+        if tenant_token is not None:
+            tenant.reset_scope(tenant_token)
         llm.end_request_usage(usage_token)
 
 
@@ -1312,7 +1319,7 @@ def get_bill(bill_id: str) -> JSONResponse:
 def propose_bill(req: ProposeRequest) -> JSONResponse:
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Bill text is required")
-    bill = bills_mod.propose(req.title, req.text, req.scope, emergency=req.emergency)
+    bill = bills_mod.propose(req.title, req.text, req.scope, sponsor=tenant.citizen_id(), emergency=req.emergency)
     bills_mod.save_bill(bill)
     audit.log_event("bill_proposed", {
         "id": bill.id, "title": bill.title, "scope": bill.scope, "emergency": bill.emergency,
@@ -1385,7 +1392,7 @@ def endorse_bill(bill_id: str) -> JSONResponse:
     if bill is None:
         raise HTTPException(status_code=404, detail="Bill not found")
     try:
-        bills_mod.endorse(bill, "local")
+        bills_mod.endorse(bill, tenant.citizen_id())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     audit.log_event("bill_endorsed", {"id": bill.id, "total": bills_mod.total_endorsements(bill)})
@@ -1402,7 +1409,7 @@ def revoke_bill_endorsement(bill_id: str) -> JSONResponse:
     bill = bills_mod.load_bill(bill_id)
     if bill is None:
         raise HTTPException(status_code=404, detail="Bill not found")
-    if not bills_mod.revoke_endorsement(bill, "local"):
+    if not bills_mod.revoke_endorsement(bill, tenant.citizen_id()):
         raise HTTPException(status_code=400, detail="No revocable endorsement (not endorsed, or the 24h window has passed).")
     bills_mod.save_bill(bill)
     audit.log_event("endorsement_revoked", {"id": bill.id})
