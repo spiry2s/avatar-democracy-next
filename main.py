@@ -57,6 +57,7 @@ from backend import (
     population,
     profile as profile_mod,
     questionnaire,
+    signing,
     summarizer,
     tenant,
     vote_analysis,
@@ -1073,6 +1074,12 @@ def analyze(
             detail=f"Analysis failed: {str(e)}",
         ) from e
 
+    if isinstance(analysis, dict):
+        try:
+            signing.sign(analysis)
+        except (signing.SigningUnavailable, ValueError) as e:
+            # Unsigned analyses still display; a vote on one abstains.
+            print(f"analysis not signed: {e}", file=sys.stderr)
     body: dict = {
         "success": True,
         "analysis": analysis,
@@ -1244,6 +1251,9 @@ def avatar_vote(req: VoteRequest) -> JSONResponse:
     for this request, the same as any other vote. A forged or oversized
     analysis is refused before the model is called.
     """
+    # The grounding and comparison marks in this body decide whether the
+    # Avatar may vote yes or no. Only an analysis this server signed is trusted.
+    verified = signing.verify(req.analysis)
     try:
         analysis = vote_analysis.accept_vote_analysis(req.analysis)
     except vote_analysis.AnalysisRejected as e:
@@ -1257,6 +1267,14 @@ def avatar_vote(req: VoteRequest) -> JSONResponse:
             status_code=400,
             detail="Configure your Avatar first (visit /avatar).",
         )
+
+    if not verified:
+        vote = avatar.abstain_unverified(analysis)
+        audit.log_event("vote_unverified_analysis", {
+            "bill_title": vote.bill_title,
+            "sections": len(vote.section_votes),
+        })
+        return JSONResponse(content={"vote": vote.to_dict()})
 
     try:
         vote = avatar.cast_vote(analysis, p)

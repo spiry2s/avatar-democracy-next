@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from backend import avatar, bill_fetch, comparison, config, extractors, invites, llm, summarizer
+from backend import signing, avatar, bill_fetch, comparison, config, extractors, invites, llm, summarizer
 from backend.profile import CitizenProfile
 from backend.vote_analysis import (
     VOTE_ANALYSIS_PROMPT_FACTOR,
@@ -76,6 +76,11 @@ def _analysis(**overrides: Any) -> dict[str, Any]:
     }
     data.update(overrides)
     return data
+
+
+def _signed(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Sign a copy the way /api/analyze signs what it returns."""
+    return signing.sign(json.loads(json.dumps(analysis)))
 
 
 def _bare() -> dict[str, Any]:
@@ -289,7 +294,7 @@ def test_vote_uses_the_posted_analysis_and_does_not_analyze(client, monkeypatch)
     first = _analysis(title="Bill Alpha", plain_summary="ALPHA_MARKER is the summary.")
     other = _analysis(title="Bill Beta", plain_summary="BETA_MARKER is the other bill.")
     other["ignore_previous_instructions"] = "SMUGGLED_ORDER"
-    response = client.post("/api/avatar/vote", json={"analysis": other})
+    response = client.post("/api/avatar/vote", json={"analysis": _signed(other)})
     assert response.status_code == 200, response.text
     body = response.json()["vote"]
     assert body["bill_title"] == "Bill Beta"
@@ -320,7 +325,7 @@ def test_ungrounded_summary_is_withheld_from_the_vote_prompt(client, monkeypatch
             },
         ],
     )
-    response = client.post("/api/avatar/vote", json={"analysis": data})
+    response = client.post("/api/avatar/vote", json={"analysis": _signed(data)})
     assert response.status_code == 200, response.text
     prompt = fake.calls[0]["user"]
     assert "GROUNDED_SUMMARY" in prompt
@@ -346,7 +351,7 @@ def test_comparison_disagreement_still_abstains_after_the_cap(client, monkeypatc
             ],
         },
     )
-    response = client.post("/api/avatar/vote", json={"analysis": data})
+    response = client.post("/api/avatar/vote", json={"analysis": _signed(data)})
     assert response.status_code == 200, response.text
     vote = response.json()["vote"]["section_votes"][0]
     assert vote["position"] == "abstain"
@@ -364,12 +369,12 @@ def test_oversized_and_garbage_analyses_do_not_call_the_model(client, monkeypatc
     monkeypatch.setenv("AVATAR_MAX_BILL_CHARS", "50")
     huge = _analysis()
     huge["plain_summary"] = "Z" * 51
-    rejected = client.post("/api/avatar/vote", json={"analysis": huge})
+    rejected = client.post("/api/avatar/vote", json={"analysis": _signed(huge)})
     assert rejected.status_code == 413
     assert rejected.json()["detail"] == vote_analysis_too_large(50)
     assert "Z" * 10 not in rejected.text
 
-    garbage = client.post("/api/avatar/vote", json={"analysis": {"title": "Only a title"}})
+    garbage = client.post("/api/avatar/vote", json={"analysis": _signed({"title": "Only a title"})})
     assert garbage.status_code == 400
     assert "failed schema" in garbage.json()["detail"]
     assert fake.calls == []
@@ -386,7 +391,7 @@ def test_blocking_truncation_does_not_call_the_model(client, monkeypatch):
             "analyzed_chars": 80,
         },
     )
-    response = client.post("/api/avatar/vote", json={"analysis": data})
+    response = client.post("/api/avatar/vote", json={"analysis": _signed(data)})
     assert response.status_code == 200, response.text
     vote = response.json()["vote"]
     assert vote["truncation_blocking"] is True
@@ -403,14 +408,14 @@ def test_vote_does_not_reserve_a_bill_credit(client, monkeypatch, tmp_path):
     http = TestClient(main.app, base_url="http://127.0.0.1:8000")
     assert http.get("/", params={"token": issued.token}, follow_redirects=False).status_code == 303
 
-    first = http.post("/api/avatar/vote", json={"analysis": _analysis()})
+    first = http.post("/api/avatar/vote", json={"analysis": _signed(_analysis())})
     assert first.status_code == 200, first.text
     row = invites.get_invite(issued.invite.id)
     assert row is not None
     assert row.bills_used == 0
     assert row.llm_calls_used == 1
 
-    second = http.post("/api/avatar/vote", json={"analysis": _analysis(title="Second bill")})
+    second = http.post("/api/avatar/vote", json={"analysis": _signed(_analysis(title="Second bill"))})
     assert second.status_code == 200, second.text
     row = invites.get_invite(issued.invite.id)
     assert row is not None
@@ -421,7 +426,7 @@ def test_vote_does_not_reserve_a_bill_credit(client, monkeypatch, tmp_path):
 
     huge = _analysis()
     huge["title"] = "Q" * (config.max_bill_chars() + 1)
-    rejected = http.post("/api/avatar/vote", json={"analysis": huge})
+    rejected = http.post("/api/avatar/vote", json={"analysis": _signed(huge)})
     assert rejected.status_code == 413
     row = invites.get_invite(issued.invite.id)
     assert row is not None

@@ -371,8 +371,14 @@ function renderVoteBanner(vote) {
   if (excerptNote && !vote.truncation_blocking) {
     parts.push(`<div class="grounding-banner warning">${escHtml(excerptNote)}</div>`);
   }
-  if (vote.truncation_blocking) {
+  const votes = vote.section_votes || [];
+  const unverified = votes.length > 0 && votes.every(v => v.basis === 'unverified');
+  if (vote.truncation_blocking || unverified) {
     parts.push(`<div class="grounding-banner blocking"><strong>No yes or no vote.</strong> ${escHtml(vote.blocking_reason || vote.recommendation || 'The bill was truncated.')}</div>`);
+    if (unverified) {
+      el.innerHTML = parts.join('');
+      return;
+    }
   }
   const flags = (vote.withheld_ungrounded && vote.withheld_ungrounded.high_severity_flags) || [];
   if (flags.length) {
@@ -391,6 +397,7 @@ function formatBasis(basis) {
   if (basis.startsWith('delegate:')) return `following delegate · ${escHtml(basis.slice(9).trim())}`;
   if (basis === 'values') return 'your values statement';
   if (basis === 'compass') return 'your compass (fallback)';
+  if (basis === 'unverified') return 'analysis not verified — analyze the bill again';
   return escHtml(basis);
 }
 
