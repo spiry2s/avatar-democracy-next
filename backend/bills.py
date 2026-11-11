@@ -14,14 +14,17 @@ share the same passage logic.
 
 from __future__ import annotations
 
-import json
+import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from backend import config
+from backend import config, storage
+
+log = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 BILLS_DIR = DATA_DIR / "bills"
@@ -295,34 +298,67 @@ def compute_result(section_tallies: list[dict[str, Any]], ratio: float) -> dict[
 # ── persistence ──────────────────────────────────────────────────────────────
 
 
+_BILL_ID = re.compile(r"bill-[0-9a-f]{1,32}\Z")
+
+
+def _bill_path(bill_id: str) -> Path | None:
+    """File for a bill id, or None for an id this module never issues.
+
+    Ids come from the URL. Only ``bill-<hex>`` maps to a file, so ``..`` or a
+    Windows backslash cannot address anything outside BILLS_DIR.
+    """
+    if not isinstance(bill_id, str) or not _BILL_ID.fullmatch(bill_id):
+        return None
+    return BILLS_DIR / f"{bill_id}.json"
+
+
 def save_bill(bill: Bill) -> None:
-    BILLS_DIR.mkdir(parents=True, exist_ok=True)
+    path = _bill_path(bill.id)
+    if path is None:
+        raise ValueError(f"invalid bill id {bill.id!r}")
     bill.updated_at = time.time()
     # to_dict adds derived fields; strip them before persisting the canonical form
     data = bill.to_dict()
     for derived in ("total_endorsements", "cooling_off_remaining"):
         data.pop(derived, None)
-    (BILLS_DIR / f"{bill.id}.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+    storage.write_json(path, data)
+
+
+def _bill_from(path: Path, data: Any) -> Bill:
+    if not isinstance(data, dict):
+        raise storage.CorruptStateError(path, ValueError("not a JSON object"))
+    try:
+        return Bill.from_dict(data)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise storage.CorruptStateError(path, exc) from exc
 
 
 def load_bill(bill_id: str) -> Bill | None:
-    path = BILLS_DIR / f"{bill_id}.json"
-    if not path.exists():
+    """The bill, or None when it does not exist.
+
+    A bill file that exists but cannot be read raises storage.CorruptStateError
+    instead of looking like "not found".
+    """
+    path = _bill_path(bill_id)
+    if path is None:
         return None
-    try:
-        return Bill.from_dict(json.loads(path.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError, KeyError):
+    data = storage.read_json(path)
+    if data is None:
         return None
+    return _bill_from(path, data)
 
 
 def list_bills() -> list[Bill]:
+    """Every readable bill, newest first. An unreadable file is skipped and logged."""
     if not BILLS_DIR.exists():
         return []
     bills = []
-    for path in BILLS_DIR.glob("*.json"):
+    for path in BILLS_DIR.glob("bill-*.json"):
         try:
-            bills.append(Bill.from_dict(json.loads(path.read_text(encoding="utf-8"))))
-        except (json.JSONDecodeError, OSError, KeyError):
-            continue
+            data = storage.read_json(path)
+            if data is not None:
+                bills.append(_bill_from(path, data))
+        except storage.CorruptStateError as exc:
+            log.warning("skipping unreadable bill file %s: %s", path.name, exc)
     bills.sort(key=lambda b: b.created_at, reverse=True)
     return bills

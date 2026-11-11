@@ -15,13 +15,15 @@ just a compass). Persisted to data/population.json and reused across votes.
 
 from __future__ import annotations
 
-import json
+import logging
 import random
 import time
 from pathlib import Path
 from typing import Any
 
-from backend import config
+from backend import config, storage
+
+log = logging.getLogger(__name__)
 from backend.questionnaire import AXES
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -61,18 +63,36 @@ def generate_population(size: int | None = None, seed: int | None = None) -> lis
 
 
 def load_population() -> list[dict[str, Any]]:
-    """Load the population, generating a default one on first use."""
-    if not POPULATION_FILE.exists():
-        return generate_population()
+    """Load the population, generating a default one on first use.
+
+    The population is synthetic, so an unreadable file is replaced with a new
+    one. The old file is first moved aside (``population.json.corrupt-<time>``)
+    and a warning is logged, so nothing disappears silently.
+    """
     try:
-        return json.loads(POPULATION_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        data = storage.read_json(POPULATION_FILE)
+    except storage.CorruptStateError as exc:
+        _set_aside(exc)
         return generate_population()
+    if data is None:
+        return generate_population()
+    if not isinstance(data, list):
+        _set_aside(storage.CorruptStateError(POPULATION_FILE, ValueError("not a JSON list")))
+        return generate_population()
+    return data
+
+
+def _set_aside(exc: storage.CorruptStateError) -> None:
+    target = POPULATION_FILE.with_name(f"{POPULATION_FILE.name}.corrupt-{int(time.time())}")
+    try:
+        POPULATION_FILE.replace(target)
+        log.warning("population file unreadable (%s); moved to %s and regenerated", exc, target.name)
+    except OSError:
+        log.warning("population file unreadable (%s); regenerated", exc)
 
 
 def save_population(citizens: list[dict[str, Any]]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    POPULATION_FILE.write_text(json.dumps(citizens, indent=2), encoding="utf-8")
+    storage.write_json(POPULATION_FILE, citizens)
 
 
 def summary(citizens: list[dict[str, Any]] | None = None) -> dict[str, Any]:

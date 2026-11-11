@@ -61,6 +61,7 @@ from backend import (
     vote_analysis,
 )
 from backend.bill_fetch import BillSourceError
+from backend.storage import CorruptStateError
 
 # Resolve frontend directory relative to project root
 PROJECT_ROOT = Path(__file__).parent
@@ -704,6 +705,13 @@ app = FastAPI(
     description="Plain-language summaries and red-flag detection for legislative bills.",
     version="0.1.0",
 )
+
+
+
+@app.exception_handler(CorruptStateError)
+async def corrupt_state(_request: Request, exc: CorruptStateError) -> JSONResponse:
+    """A saved file could not be read. Say so plainly; the file is left untouched."""
+    return JSONResponse({"detail": str(exc), "code": "corrupt_state"}, status_code=500)
 
 # Serve frontend static files (CSS, JS) at /static/*
 if FRONTEND_DIR.exists():
