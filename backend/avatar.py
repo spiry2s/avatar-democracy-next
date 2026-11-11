@@ -419,6 +419,42 @@ def _abstain_for_block(analysis: dict[str, Any], reason: str, *, truncation: boo
     )
 
 
+UNVERIFIED_ANALYSIS_REASON = (
+    "This analysis could not be verified as one this server produced (its signature is "
+    "missing or does not match), so its quote checks cannot be trusted. The Avatar did not "
+    "cast a yes or no. Analyze the bill again, then vote."
+)
+
+
+def abstain_unverified(analysis: dict[str, Any]) -> AvatarVote:
+    """Every section abstains, with no model call: the analysis was not signed by this server."""
+    sections = [s for s in analysis.get("sections") or [] if isinstance(s, dict)]
+    targets = sections or [{"section_id": "whole_bill", "heading": analysis.get("title") or "Bill"}]
+    votes = [
+        SectionVote(
+            section_id=str(section.get("section_id", "?")),
+            heading=section.get("heading") or "",
+            position="abstain",
+            basis="unverified",
+            reasoning=UNVERIFIED_ANALYSIS_REASON,
+            confidence="low",
+            grounding_block=True,
+            blocked_reason=UNVERIFIED_ANALYSIS_REASON,
+        )
+        for section in targets
+    ]
+    return AvatarVote(
+        bill_title=analysis.get("title") or "Untitled bill",
+        section_votes=votes,
+        recommendation=UNVERIFIED_ANALYSIS_REASON,
+        would_pass_sections=[],
+        key_tension="",
+        withheld_ungrounded={"sections": [], "high_severity_flags": []},
+        truncation_blocking=False,
+        blocking_reason=UNVERIFIED_ANALYSIS_REASON,
+    )
+
+
 def cast_vote(
     analysis: dict[str, Any],
     profile: CitizenProfile,

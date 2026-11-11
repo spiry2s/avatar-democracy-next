@@ -134,6 +134,9 @@ def accept_vote_analysis(data: Any) -> dict[str, Any]:
     """
     if not isinstance(data, dict):
         _fail("top-level value must be an object")
+    # The server signature is checked by the caller (backend.signing) and is
+    # not bill content, so it does not count toward the size caps.
+    data = {key: value for key, value in data.items() if key != "server_signature"}
     limit = config.max_bill_chars()
     _reject_oversized_tree(data, limit)
     cleaned = validate_analysis(data)
