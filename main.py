@@ -676,6 +676,25 @@ def _settle_invite_budget(request: Request, status: int) -> None:
         print("invite budget settle failed; the reservation stands", file=sys.stderr)
 
 
+# Multipart framing around the file: boundaries, part headers, the other fields.
+_UPLOAD_OVERHEAD_BYTES = 64 * 1024
+
+
+def _declared_body_too_large(request: Request) -> bool:
+    """True when Content-Length announces more than an upload may be.
+
+    A missing or unreadable length is left to the capped read in the handler.
+    """
+    values = _raw_header_values(request, "content-length")
+    if len(values) != 1:
+        return False
+    try:
+        declared = int(values[0].strip())
+    except ValueError:
+        return False
+    return declared > extractors.MAX_UPLOAD_BYTES + _UPLOAD_OVERHEAD_BYTES
+
+
 def guard_api_request(request: Request) -> Response | None:
     """Block a bad request. None means the route may run.
 
@@ -713,6 +732,11 @@ def guard_api_request(request: Request) -> Response | None:
         types = _media_types(request)
         if not types or any(media != expected for media in types):
             return _deny(415, "Unsupported Media Type")
+    if request.method == "POST" and path == "/api/analyze" and _declared_body_too_large(request):
+        # Refuse before the multipart body is parsed or any budget is reserved.
+        return JSONResponse(
+            {"detail": extractors.MSG_UPLOAD_TOO_BIG, "code": "too_big"}, status_code=413,
+        )
     if is_spending_request(request.method, path):
         if access_token_required() and _rate_limited(request):
             return _deny(429, "Too Many Requests", {"Retry-After": str(int(RATE_WINDOW_SECONDS))})
@@ -1029,7 +1053,14 @@ def analyze(
         elif url:
             bill_text = extractors.extract_text(url, source_type="url")
         elif file:
-            content = file.file.read()
+            # Read one byte past the cap so an oversized file is detected
+            # without reading all of it (issue #10).
+            content = file.file.read(extractors.MAX_UPLOAD_BYTES + 1)
+            if len(content) > extractors.MAX_UPLOAD_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": extractors.MSG_UPLOAD_TOO_BIG, "code": "too_big"},
+                )
             bill_text = extractors.extract_text(content, source_type="pdf")
         else:
             # Should never reach here due to checks above
