@@ -11,11 +11,23 @@ from __future__ import annotations
 import io
 import re
 
-from backend.bill_fetch import MSG_TYPE, MSG_UNSUPPORTED, BillSourceError, fetch_official_document
+from backend.bill_fetch import (
+    MAX_DOWNLOAD_BYTES,
+    MSG_TYPE,
+    MSG_UNSUPPORTED,
+    BillSourceError,
+    fetch_official_document,
+)
 
 # The analyzer refuses anything shorter than this. A PDF under the floor is
 # treated as a scan (no text layer) rather than as a short bill.
 MIN_BILL_CHARS = 100
+# Uploaded files use the same cap as a fetched bill link (issue #10).
+MAX_UPLOAD_BYTES = MAX_DOWNLOAD_BYTES
+MSG_UPLOAD_TOO_BIG = (
+    "That file is larger than 15 MB. "
+    "Paste the bill text, or upload a smaller file."
+)
 PDF_MAX_PAGES = 300
 PDF_MAX_CHARS = 1_500_000
 
