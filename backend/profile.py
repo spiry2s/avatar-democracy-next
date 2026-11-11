@@ -18,7 +18,7 @@ deployment would key profiles by verified eID. citizen_id defaults to "local".
 from __future__ import annotations
 
 import contextvars
-import json
+
 import os
 import re
 import time
@@ -27,7 +27,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any
 
-from backend import invites
+from backend import invites, storage
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 PROFILE_FILE = DATA_DIR / "profile.json"
@@ -239,15 +239,24 @@ def _tighten(path: Path) -> None:
 
 
 def load_profile() -> CitizenProfile | None:
-    """Load the stored profile, or None if none exists yet."""
+    """Load the stored profile, or None if none exists yet.
+
+    A file that exists but cannot be read raises storage.CorruptStateError.
+    It must not read as "no profile": the next save would replace the
+    citizen's values and delegates with an empty profile.
+    """
     path = _profile_path()
-    if path is None or not path.exists():
+    if path is None:
         return None
+    data = storage.read_json(path)
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise storage.CorruptStateError(path, ValueError("not a JSON object"))
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return CitizenProfile.from_dict(data)
+        return CitizenProfile.from_dict(data)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise storage.CorruptStateError(path, exc) from exc
 
 
 def save_profile(profile: CitizenProfile) -> None:
@@ -264,5 +273,5 @@ def save_profile(profile: CitizenProfile) -> None:
     except OSError:
         pass
     profile.updated_at = time.time()
-    path.write_text(json.dumps(profile.to_dict(), indent=2), encoding="utf-8")
+    storage.write_json(path, profile.to_dict())
     _tighten(path)
