@@ -637,6 +637,8 @@ def _reserve_invite_budget(request: Request) -> JSONResponse | None:
     except (invites.InvitePathError, sqlite3.Error):
         return _deny(403, "Forbidden")
     if outcome == "ok":
+        # Settled against actual model calls after the handler runs.
+        request.state.invite_reserved = (record.id, bills, calls)
         return None
     if outcome == "bills":
         return _deny(429, "Invite bill budget exhausted")
@@ -645,6 +647,32 @@ def _reserve_invite_budget(request: Request) -> JSONResponse | None:
     if outcome == "calls":
         return _deny(429, "Invite model-call budget exhausted")
     return _deny(403, "Forbidden")
+
+
+def _settle_invite_budget(request: Request, status: int) -> None:
+    """Swap the admission reservation for what the request actually spent.
+
+    Model calls are charged as observed on this request (issues #5 and #6).
+    A reserved bill is returned only when the request failed and no model
+    was called, so nothing was analyzed. A settle failure is logged and the
+    reservation stands, which errs toward charging, never toward free calls.
+    """
+    reserved = getattr(request.state, "invite_reserved", None)
+    if not reserved:
+        return
+    request.state.invite_reserved = None
+    invite_id, bills, calls = reserved
+    used_calls, _tokens = llm.snapshot_request_usage()
+    try:
+        invites.settle(
+            invite_id,
+            reserved_bills=bills,
+            reserved_calls=calls,
+            used_calls=used_calls,
+            refund_bills=status >= 400 and used_calls == 0,
+        )
+    except (invites.InvitePathError, sqlite3.Error, ValueError):
+        print("invite budget settle failed; the reservation stands", file=sys.stderr)
 
 
 def guard_api_request(request: Request) -> Response | None:
@@ -750,7 +778,12 @@ async def reject_untrusted_api_requests(request: Request, call_next):
             # Bills stay shared between testers by design. Endorsements are
             # recorded under each tester's own invite id, not one shared "local".
             tenant_token = tenant.push_scope(record.id)
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            _settle_invite_budget(request, 500)
+            raise
+        _settle_invite_budget(request, response.status_code)
         invites.record_request(request, response.status_code, response, llm.snapshot_request_usage())
         return _with_security_headers(response)
     finally:

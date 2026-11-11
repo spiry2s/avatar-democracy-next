@@ -46,6 +46,8 @@ class FakeProvider(llm.LLMProvider):
         data_blocks: Any = None,
     ) -> str:
         self.calls.append({"user": user, "system": system, "max_tokens": max_tokens})
+        # Report the call like the real providers, so invite budgets see it.
+        self.note_usage(llm.TokenUsage())
         if not self._responses:
             raise AssertionError("FakeProvider ran out of scripted responses")
         item = self._responses.pop(0)
@@ -424,8 +426,9 @@ def test_vote_does_not_reserve_a_bill_credit(client, monkeypatch, tmp_path):
     row = invites.get_invite(issued.invite.id)
     assert row is not None
     assert row.bills_used == 0
-    # Admission reserves the model call before the handler refuses the body.
-    assert row.llm_calls_used == 3
+    # Admission reserves a call, and settling refunds it: the handler refused
+    # the body before any model call (issue #6).
+    assert row.llm_calls_used == 2
     invites.close_store()
 
 
