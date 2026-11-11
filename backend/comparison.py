@@ -21,6 +21,7 @@ and does not add a key.
 
 from __future__ import annotations
 
+import contextvars
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -1514,8 +1515,11 @@ def analyze_for_api(bill_text: str) -> dict[str, Any]:
     primary_result: summarizer.BillAnalysis | None = None
     other_result: summarizer.BillAnalysis | None = None
     with ThreadPoolExecutor(max_workers=2) as pool:
-        primary_future = pool.submit(_run_primary)
-        comparison_future = pool.submit(_run_comparison)
+        # Each worker runs in a copy of this request's context, so its model
+        # calls reach the request's usage bucket even when the pass fails.
+        # Invite budgets are settled from that bucket.
+        primary_future = pool.submit(contextvars.copy_context().run, _run_primary)
+        comparison_future = pool.submit(contextvars.copy_context().run, _run_comparison)
         try:
             primary_result = primary_future.result()
         except Exception as exc:

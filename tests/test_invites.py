@@ -93,6 +93,25 @@ def _fresh(monkeypatch) -> TestClient:
     return TestClient(main.app, base_url="http://127.0.0.1:8000")
 
 
+def _spending(monkeypatch, calls_per_analysis: int = 1) -> None:
+    """Make /api/analyze succeed and report model calls, like a real provider.
+
+    A request that fails before any model call is refunded (issue #6), so a
+    test that wants to use up credit has to actually spend it.
+    """
+
+    def fake_extract(source, source_type):
+        return "Section 1. " + "Bill text. " * 20
+
+    def fake_analyze(text):
+        for _ in range(calls_per_analysis):
+            llm._note_request_usage(llm.TokenUsage(input_tokens=1, output_tokens=1))
+        return {"title": "t", "sections": []}
+
+    monkeypatch.setattr(main.extractors, "extract_text", fake_extract)
+    monkeypatch.setattr(main.comparison, "analyze_for_api", fake_analyze)
+
+
 def _run_cli(tmp_path: Path, *args: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["AVATAR_INVITE_DATA_DIR"] = str(tmp_path)
@@ -447,21 +466,17 @@ def test_budget_exhausted_on_each_spending_route(monkeypatch):
         http = _fresh(monkeypatch)
         issued = invites.create_invite(label=name, bills=1, calls=1)
         assert _redeem(http, issued).status_code == 303
-        first = call(http)
-        assert first.status_code != 429, (name, first.status_code, first.text)
-        second = call(http)
-        assert second.status_code == 429, name
-        assert second.json()["detail"] in {
+        # Use the whole budget the way an earlier successful request would.
+        assert invites.try_reserve(issued.invite.id, 1, 1) == "ok"
+        refused = call(http)
+        assert refused.status_code == 429, name
+        assert refused.json()["detail"] in {
             "Invite bill budget exhausted",
             "Invite model-call budget exhausted",
         }
         row = invites.get_invite(issued.invite.id)
         assert row is not None
-        assert row.llm_calls_used == 1
-        if name.startswith("analyze"):
-            assert row.bills_used == 1
-        else:
-            assert row.bills_used == 0
+        assert (row.bills_used, row.llm_calls_used) == (1, 1), name
 
 
 def test_text_and_url_share_the_bill_budget(monkeypatch):
@@ -476,6 +491,7 @@ def test_text_and_url_share_the_bill_budget(monkeypatch):
             lambda http: http.post("/api/analyze", files={"text": (None, "hi")}),
         ),
     ):
+        _spending(monkeypatch)
         http = TestClient(main.app, base_url="http://127.0.0.1:8000")
         issued = invites.create_invite(label="ada", bills=1, calls=10)
         assert _redeem(http, issued).status_code == 303
@@ -499,10 +515,11 @@ def test_comparison_reserves_a_second_model_call(monkeypatch):
     row = invites.get_invite(broke.invite.id)
     assert row is not None and row.bills_used == 0 and row.llm_calls_used == 0
 
+    _spending(monkeypatch, calls_per_analysis=2)
     http = TestClient(main.app, base_url="http://127.0.0.1:8000")
     enough = invites.create_invite(label="two", bills=5, calls=2)
     assert _redeem(http, enough).status_code == 303
-    assert http.post("/api/analyze", files={"text": (None, "hi")}).status_code != 429
+    assert http.post("/api/analyze", files={"text": (None, "hi")}).status_code == 200
     again = http.post("/api/analyze", files={"text": (None, "hi")})
     assert again.status_code == 429
     row = invites.get_invite(enough.invite.id)
@@ -642,6 +659,7 @@ def test_provider_key_is_not_echoed(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
     monkeypatch.setenv("OPENAI_API_KEY", SENTINEL_OAI)
     issued = invites.create_invite(label="ada", bills=1, calls=1)
+    _spending(monkeypatch)
     http = TestClient(main.app, base_url="http://127.0.0.1:8000")
     blobs = []
     blobs.append(http.get("/").text)
@@ -731,15 +749,17 @@ def test_lan_token_host_origin_and_rate_limit_still_apply(monkeypatch):
     assert response.json()["detail"] == "Too Many Requests"
     assert response.headers["retry-after"] == "60"
     row = invites.get_invite(issued.invite.id)
-    assert row is not None and row.bills_used == main.RATE_LIMIT
+    # Each 400 called no model, so its bill and call were refunded (issue #6).
+    assert row is not None and row.bills_used == 0 and row.llm_calls_used == 0
 
     clock["now"] += main.RATE_WINDOW_SECONDS + 1
     tight = invites.create_invite(label="bea", bills=2, calls=2)
     other = TestClient(main.app, base_url="http://127.0.0.1:8000")
     assert _redeem(other, tight).status_code == 303
     headers = {"X-Access-Token": LAN_TOKEN}
-    assert other.post("/api/analyze", files={"text": (None, "hi")}, headers=headers).status_code == 400
-    assert other.post("/api/analyze", files={"text": (None, "hi")}, headers=headers).status_code == 400
+    _spending(monkeypatch)
+    assert other.post("/api/analyze", files={"text": (None, "hi")}, headers=headers).status_code == 200
+    assert other.post("/api/analyze", files={"text": (None, "hi")}, headers=headers).status_code == 200
     budget = other.post("/api/analyze", files={"text": (None, "hi")}, headers=headers)
     assert budget.status_code == 429
     assert budget.json()["detail"] == "Invite bill budget exhausted"
@@ -899,10 +919,11 @@ def test_daily_bill_limit_resets_at_the_utc_boundary(monkeypatch):
     issued = invites.create_invite(
         label="ada", bills=30, bills_daily=1, calls=10, ttl_seconds=7 * 24 * 3600,
     )
+    _spending(monkeypatch)
     http = TestClient(main.app, base_url="http://127.0.0.1:8000")
     assert _redeem(http, issued).status_code == 303
     first = http.post("/api/analyze", files={"text": (None, "hi")})
-    assert first.status_code != 429
+    assert first.status_code == 200
     blocked = http.post("/api/analyze", files={"text": (None, "hi")})
     assert blocked.status_code == 429
     assert blocked.json()["detail"] == "Invite daily bill limit reached. It resets at UTC midnight."
@@ -914,7 +935,9 @@ def test_daily_bill_limit_resets_at_the_utc_boundary(monkeypatch):
     assert row.bills_used == 1
     assert row.bills_used_today == 1
     assert row.bills_day == "2026-11-05"
-    assert row.llm_calls_used == 2
+    # The analysis made one call. The vote was refused before any model call,
+    # so it was not charged (issue #6).
+    assert row.llm_calls_used == 1
     assert "1/1" in invites.format_list(invites.list_invites())
 
     clock["now"] = _utc(2026, 11, 6, 0, 0)
@@ -937,6 +960,7 @@ def test_daily_bill_limit_resets_at_the_utc_boundary(monkeypatch):
 def test_total_bill_budget_exhausted_while_daily_credit_remains(monkeypatch):
     _enable(monkeypatch)
     issued = invites.create_invite(label="ada", bills=1, bills_daily=10, calls=5)
+    _spending(monkeypatch)
     http = TestClient(main.app, base_url="http://127.0.0.1:8000")
     assert _redeem(http, issued).status_code == 303
     assert http.post("/api/analyze", files={"text": (None, "hi")}).status_code != 429

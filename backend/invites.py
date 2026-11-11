@@ -768,6 +768,71 @@ def try_reserve(invite_id: str, bills: int, calls: int) -> str:
             raise
 
 
+def settle(
+    invite_id: str,
+    *,
+    reserved_bills: int,
+    reserved_calls: int,
+    used_calls: int,
+    refund_bills: bool,
+) -> bool:
+    """Replace an admission reservation with what the request actually used.
+
+    ``try_reserve`` charges a fixed estimate before the handler runs, so a
+    request that is over budget is refused up front. Afterwards this swaps
+    the estimate for the truth, in one transaction:
+
+    - model calls: ``used_calls - reserved_calls`` is added. A vote that made
+      three calls is charged three, not one (issue #5). A request that made
+      none is charged none (issue #6). The total can end above the budget
+      once, because the calls already happened; the next ``try_reserve``
+      then refuses further spending.
+    - bills: with ``refund_bills`` the reserved bills are returned, on both
+      the lifetime and today's counter. The caller passes it only when no
+      model was called and the request failed, so nothing was analyzed.
+
+    Counters never go below zero. Returns False when the invite is unknown.
+    """
+    for value in (reserved_bills, reserved_calls, used_calls):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("settle counts must be non-negative integers")
+    if not isinstance(invite_id, str) or not _ID_RE.fullmatch(invite_id):
+        return False
+    bills_back = reserved_bills if refund_bills else 0
+    calls_delta = used_calls - reserved_calls
+    if bills_back == 0 and calls_delta == 0:
+        return True
+    today = _utc_day(time.time())
+    with _lock:
+        conn = _connect_write()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                """
+                UPDATE invites
+                   SET llm_calls_used = MAX(0, llm_calls_used + ?),
+                       bills_used = MAX(0, bills_used - ?),
+                       bills_used_today = CASE
+                           WHEN bills_day = ? THEN MAX(0, bills_used_today - ?)
+                           ELSE bills_used_today
+                       END
+                 WHERE id = ?
+                """,
+                (calls_delta, bills_back, today, bills_back, invite_id),
+            )
+            if cur.rowcount != 1:
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute("COMMIT")
+            return True
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+
 def _cookie_values(request: Any, name: str) -> list[str]:
     found: list[str] = []
     headers = request.scope.get("headers") or ()
