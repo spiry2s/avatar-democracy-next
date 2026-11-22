@@ -114,6 +114,10 @@ class LLMProvider(ABC):
         """Whether `complete` takes `data_blocks` outside the instruction string."""
         return False
 
+    def accepts_schema(self) -> bool:
+        """Whether `complete` takes `schema` and has the API enforce it (structured outputs)."""
+        return False
+
     def note_usage(self, usage: TokenUsage) -> None:
         """Remember one call's token counts. Safe if a subclass has no __init__."""
         log = getattr(self, "usage_log", None)
@@ -150,8 +154,14 @@ class LLMProvider(ABC):
         max_tokens: int | None = None,
         error_prefix: str = "Could not parse response as JSON",
         data_blocks: Sequence[DataBlock] | None = None,
+        schema: dict[str, Any] | None = None,
     ) -> Any:
         """Return parsed JSON. Strips one leading markdown fence.
+
+        ``schema`` is a JSON Schema for the reply. A provider that accepts it
+        has the API enforce it (structured outputs), so the reply cannot be
+        prose or a different shape. Other providers ignore it and the reply is
+        parsed from text as before; callers still validate either way.
 
         A truncated or empty reply is never passed to `json.loads`.
 
@@ -169,6 +179,8 @@ class LLMProvider(ABC):
         # provider whose complete() predates the argument still works.
         if data_blocks:
             kwargs["data_blocks"] = list(data_blocks)
+        if schema is not None and self.accepts_schema():
+            kwargs["schema"] = schema
         # complete() raises LLMTruncatedError before this can see the text.
         text = strip_markdown_fences(self.complete(**kwargs))
         try:
@@ -359,6 +371,9 @@ class AnthropicProvider(LLMProvider):
     def accepts_data_blocks(self) -> bool:
         return True
 
+    def accepts_schema(self) -> bool:
+        return structured_outputs_enabled() and self.model not in _SCHEMA_UNSUPPORTED
+
     def __init__(self, model: str, api_key: str | None = None):
         self.model = model
         if api_key is None:
@@ -386,6 +401,7 @@ class AnthropicProvider(LLMProvider):
         system: str | None = None,
         max_tokens: int | None = None,
         data_blocks: Sequence[DataBlock] | None = None,
+        schema: dict[str, Any] | None = None,
     ) -> str:
         # No data blocks: a single string, matching the historical messages.create
         # calls. With data blocks, the instruction text and each document are
@@ -424,7 +440,18 @@ class AnthropicProvider(LLMProvider):
         # messages.create refuses a budget that might run longer than 10 minutes
         # (ValueError: "Streaming is required..."). Streaming returns the same
         # final message, including stop_reason and usage.
-        message = _anthropic_final_message(self._anthropic(), kwargs)
+        if schema is not None:
+            kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+        try:
+            message = _anthropic_final_message(self._anthropic(), kwargs)
+        except Exception as exc:
+            if "output_config" not in kwargs or not _schema_rejected(exc):
+                raise
+            # This model or account refused structured outputs. Remember that
+            # and fall back to the text reply, which callers still validate.
+            _SCHEMA_UNSUPPORTED.add(self.model)
+            kwargs.pop("output_config")
+            message = _anthropic_final_message(self._anthropic(), kwargs)
         self.note_usage(_anthropic_usage(message))
         text = "".join(
             block.text for block in message.content if hasattr(block, "text")
@@ -435,6 +462,26 @@ class AnthropicProvider(LLMProvider):
         if stop in {"max_tokens", "length"} or not text:
             raise LLMTruncatedError(_truncated_message(stop if isinstance(stop, str) else None))
         return text
+
+
+# Models that answered a structured-output request with a 400. Not retried
+# with a schema for the rest of this process.
+_SCHEMA_UNSUPPORTED: set[str] = set()
+
+
+def structured_outputs_enabled() -> bool:
+    """STRUCTURED_OUTPUTS=0 (or false/off/no) turns schema enforcement off."""
+    raw = (os.environ.get("STRUCTURED_OUTPUTS") or "").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _schema_rejected(exc: Exception) -> bool:
+    """True for a 400 that is about the output_config / format field."""
+    status = getattr(exc, "status_code", None)
+    if status != 400:
+        return False
+    text = str(exc).lower()
+    return any(word in text for word in ("output_config", "output format", "structured output", "json_schema"))
 
 
 def _anthropic_final_message(client: Any, kwargs: dict[str, Any]) -> Any:

@@ -220,6 +220,7 @@ Optional. Defaults live in `backend/config.py` and `backend/profile.py`. Copy `.
 | `CHECKER_PROVIDER` | `LLM_PROVIDER` | Vendor for the checker role (the second Claude pass, by default). Unset uses the primary provider |
 | `AVATAR_MODEL` | `claude-sonnet-4-6` | Model id sent to Anthropic for the primary role. Not sent to the OpenAI-compatible provider |
 | `CHECKER_MODEL` | `claude-haiku-4-5` | Model id sent to Anthropic for the checker role. Not sent to the OpenAI-compatible provider |
+| `STRUCTURED_OUTPUTS` | on | With the Anthropic provider, every model reply is constrained by a JSON Schema (structured outputs), so a reply is always one JSON object of the expected shape. Replies keyed by section must list every section the prompt showed, spelled exactly as given. `0`, `false`, `off`, or `no` turns this off. A model that rejects schemas falls back to parsing the text reply, once per process. The OpenAI-compatible provider always parses text |
 | `OPENAI_API_KEY` | unset | Credential for the OpenAI-compatible provider. Any non-empty placeholder works for a local server that does not check a key |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL. The client posts to `{base}/chat/completions` |
 | `OPENAI_MODEL` | unset | Model id for the primary role when that role uses `openai`. Required in that case |

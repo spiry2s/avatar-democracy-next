@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend import llm
+from backend import llm, schemas
 from backend.grounding import downstream_sections, prompt_title
 
 
@@ -51,13 +51,14 @@ def detect_conflicts(
     for b in passed_bills:
         lines.append(f"  [{b['id']}] {b.get('title', '')}: {b.get('summary', '')}")
     lines.append("")
-    lines.append('Output ONLY JSON: a list of {"bill_id": "<id>", "conflict": "<one sentence>"}.')
-    lines.append("Return [] if there are no genuine conflicts. No prose, no markdown fences.")
+    lines.append('Output ONLY JSON: {"conflicts": [{"bill_id": "<id>", "conflict": "<one sentence>"}]}.')
+    lines.append('Return {"conflicts": []} if there are no genuine conflicts. No prose, no markdown fences.')
 
     data = provider.complete_json(
         user="\n".join(lines),
         max_tokens=1000,
         error_prefix="Could not parse conflict response as JSON",
+        schema=schemas.conflicts_schema(b["id"] for b in passed_bills),
     )
     if isinstance(data, dict):
         data = data.get("conflicts", [])

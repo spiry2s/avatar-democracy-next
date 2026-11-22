@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from backend import config, llm
+from backend import config, llm, schemas
 from backend.grounding import (
     BILL_DATA_BEGIN,
     BILL_DATA_END,
@@ -247,6 +247,7 @@ def _invoke(
         "system": SYSTEM_PROMPT,
         "max_tokens": max_tokens,
         "error_prefix": "Could not parse response as JSON",
+        "schema": schemas.analysis_schema(),
     }
     if data_channel:
         shielded = shield_delimiters(chunk, BILL_DATA_BEGIN, BILL_DATA_END)
