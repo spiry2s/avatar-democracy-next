@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass, asdict, field
 from typing import Any
 
-from backend import comparison, llm, questionnaire
+from backend import comparison, llm, questionnaire, schemas
 from backend.config import MULTI_MODEL_CHECK, DELEGATE_DRIFT_CHECK
 from backend.grounding import (
     ANALYSIS_DATA_BEGIN,
@@ -368,6 +368,12 @@ def _section_vote_from_model(raw: dict[str, Any]) -> SectionVote:
     )
 
 
+def _prompt_section_ids(analysis: dict[str, Any]) -> list[str]:
+    """The section ids the vote prompt lists, or the whole-bill id it falls back to."""
+    ids = [str(s.get("section_id", "?")) for s in downstream_sections(analysis)]
+    return ids or ["whole_bill"]
+
+
 def _override_vote(vote: SectionVote, reason: str) -> None:
     if not vote.model_position:
         vote.model_position = vote.position
@@ -562,6 +568,7 @@ def cast_vote(
         system=SYSTEM_PROMPT,
         max_tokens=8000,
         error_prefix="Could not parse Avatar response as JSON",
+        schema=schemas.vote_schema(_prompt_section_ids(analysis)),
     )
 
     section_votes = [_section_vote_from_model(v) for v in data.get("section_votes", []) if isinstance(v, dict)]
@@ -673,6 +680,7 @@ def cross_check(
         system=SYSTEM_PROMPT,
         max_tokens=2000,
         error_prefix="Could not parse checker response as JSON",
+        schema=schemas.positions_schema(_prompt_section_ids(analysis)),
     )
     # The checker often embellishes (returns full vote objects, varied id formats).
     # Coerce each entry to a clean position and a canonical key; non-position
@@ -785,6 +793,7 @@ def detect_drift(
         user="\n".join(lines),
         max_tokens=1000,
         error_prefix="Could not parse drift response as JSON",
+        schema=schemas.positions_schema(t["section_id"] for t in targets),
     )
     expected = {}
     for k, v in data.items():

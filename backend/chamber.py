@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend import llm
+from backend import llm, schemas
 from backend.config import CHAMBER_VOTE_TAU
 from backend.grounding import downstream_sections, prompt_title, same_section
 from backend.questionnaire import AXES
@@ -186,6 +186,7 @@ def tag_sections(
         user=_tag_prompt(analysis),
         max_tokens=2000,
         error_prefix="Could not parse axis tags as JSON",
+        schema=schemas.tags_schema(str(s.get("section_id", "?")) for s in downstream_sections(analysis)),
     )
 
     # Normalize: ensure every section has all axes as floats in [-1, 1]
