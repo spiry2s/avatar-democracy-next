@@ -1350,6 +1350,12 @@ def avatar_override(req: OverrideRequest) -> JSONResponse:
     return JSONResponse(content={"ok": True})
 
 
+@app.get("/api/audit/verify")
+def verify_audit() -> JSONResponse:
+    """Recompute the audit hash chain and say whether history was altered."""
+    return JSONResponse(content=audit.verify_chain())
+
+
 @app.get("/api/audit")
 def get_audit(limit: int = 200) -> JSONResponse:
     """Return the audit log, newest first."""

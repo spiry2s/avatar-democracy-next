@@ -122,6 +122,8 @@ Opening the link sets an `HttpOnly` cookie named `avatar_invite`, `SameSite=Stri
 
 With invite mode on, the compass, values, delegates, and the audit log of those actions are stored per invite under the invite data directory (`profiles/` and `audits/`). They are not written to the shared `data/profile.json`. With invite mode off, the prototype still uses that one local profile. Bill drafts stay in the shared bill store either way, so every invited tester sees the same bills. Endorsements and bill sponsorship are recorded under each tester's own invite id, so two testers endorsing a bill count as two, and a tester can only revoke their own endorsement.
 
+Each audit log is hash-chained: every entry stores the hash of the one before it. Editing, deleting, inserting, or reordering a past entry breaks the chain, and `GET /api/audit/verify` (shown at the top of the History page) reports the first line that no longer checks out. This makes tampering evident, not impossible: someone who can write the file can rebuild the whole chain. Writing down the `head` hash elsewhere from time to time catches that, because a rebuilt chain ends in a different head. Entries written before chaining existed are counted as legacy and cannot be checked.
+
 ```bash
 python -m backend.invites list
 python -m backend.invites usage
