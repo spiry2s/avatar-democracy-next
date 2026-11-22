@@ -1693,3 +1693,7 @@ table {
   padding: 0.5rem 0.75rem;
   margin: 0.5rem 0;
 }
+
+.audit-chain { margin: 0; padding: 0.5rem 0.75rem; border-radius: 4px; }
+.audit-chain.ok { border-left: 4px solid var(--yes, #2e7d32); }
+.audit-chain.broken { border-left: 4px solid var(--red, #9f1d1d); font-weight: 600; }

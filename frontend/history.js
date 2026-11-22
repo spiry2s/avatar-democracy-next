@@ -1,6 +1,7 @@
 /* History — render the audit log */
 
 const auditBody = document.getElementById('audit-body');
+const auditChain = document.getElementById('audit-chain');
 
 const LABELS = {
   profile_created: { icon: '◆', text: 'Avatar configured' },
@@ -20,6 +21,8 @@ const LABELS = {
   bill_failed: { icon: '✗', text: 'Bill failed' },
   bill_conflict_flagged: { icon: '⚠', text: 'Cross-bill conflict flagged' },
   population_generated: { icon: '👥', text: 'Population generated' },
+  vote_unverified_analysis: { icon: '⚠', text: 'Vote refused: analysis not verified' },
+  delegate_source_removed: { icon: '−', text: 'Delegate source removed' },
 };
 
 async function load() {
@@ -27,8 +30,21 @@ async function load() {
   try {
     const data = await apiFetch('/api/audit').then(r => r.json());
     render(data.events || []);
+    renderChain(await apiFetch('/api/audit/verify').then(r => r.json()));
   } catch (err) {
     auditBody.innerHTML = `<p class="muted">Could not load audit log: ${escHtml(err.message)}</p>`;
+  }
+}
+
+function renderChain(c) {
+  if (!auditChain) return;
+  if (!c || typeof c.ok !== 'boolean') { auditChain.innerHTML = ''; return; }
+  const legacy = c.legacy ? ` ${c.legacy} older entr${c.legacy === 1 ? 'y was' : 'ies were'} written before chaining and cannot be checked.` : '';
+  if (c.ok) {
+    auditChain.innerHTML = `<p class="audit-chain ok">✓ History intact: ${escHtml(c.verified)} entr${c.verified === 1 ? 'y' : 'ies'} verified by hash chain.${legacy}`
+      + (c.verified ? ` <span class="muted">Head: <code>${escHtml(String(c.head).slice(0, 16))}…</code></span>` : '') + '</p>';
+  } else {
+    auditChain.innerHTML = `<p class="audit-chain broken">⚠ History was altered at line ${escHtml(c.broken_at)}: ${escHtml(c.reason)}. Entries from that point cannot be trusted.</p>`;
   }
 }
 
