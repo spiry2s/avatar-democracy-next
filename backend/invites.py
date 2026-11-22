@@ -943,6 +943,19 @@ def _location_without_token(request: Any, *, path: str | None = None) -> str:
     return target
 
 
+def _cookie_must_be_secure(request: Any) -> bool:
+    """Mark the invite cookie Secure on any https deployment.
+
+    The request scheme reads https only when uvicorn trusts the proxy that
+    terminated TLS (TRUSTED_PROXY_IPS). An https AVATAR_INVITE_BASE_URL says
+    the same thing without that setting, so it also counts (issue #12).
+    """
+    if getattr(request.url, "scheme", "") == "https":
+        return True
+    base = os.environ.get("AVATAR_INVITE_BASE_URL", "")
+    return base.strip().lower().startswith("https://")
+
+
 def _set_invite_cookie(response: Any, request: Any, token: str, invite: Invite) -> None:
     remaining = int(invite.expires_at - time.time())
     response.set_cookie(
@@ -950,7 +963,7 @@ def _set_invite_cookie(response: Any, request: Any, token: str, invite: Invite) 
         value=token,
         max_age=max(1, remaining),
         httponly=True,
-        secure=request.url.scheme == "https",
+        secure=_cookie_must_be_secure(request),
         samesite="strict",
         path="/",
     )

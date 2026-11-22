@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import hmac
+import ipaddress
 import os
 import sqlite3
 import sys
@@ -557,7 +558,12 @@ def reset_rate_limits() -> None:
 
 
 def _client_ip(request: Request) -> str:
-    """The socket peer. X-Forwarded-For and X-Real-IP are not consulted."""
+    """The client address uvicorn reports.
+
+    Headers are not read here. When the socket peer is a proxy named in
+    TRUSTED_PROXY_IPS, uvicorn has already replaced this with the address from
+    X-Forwarded-For; any other peer's forwarding headers are ignored.
+    """
     client = request.client
     if client is None or not client.host:
         return "unknown"
@@ -1651,6 +1657,38 @@ def resolve_bind_host(argv: list[str] | None = None) -> str:
     return os.environ.get("HOST", "127.0.0.1")
 
 
+def trusted_proxy_setting(raw: str | None) -> str | None:
+    """Validate TRUSTED_PROXY_IPS for uvicorn's forwarded_allow_ips.
+
+    Behind a hosting proxy every request comes from the proxy's address, so
+    the per-IP limit sees one client and the request scheme reads http even
+    on an https site (issues #11 and #12). Uvicorn rewrites the client
+    address from X-Forwarded-For and the scheme from X-Forwarded-Proto, but
+    only for peers it trusts. This names those peers: comma-separated IP
+    addresses or CIDR ranges. None keeps uvicorn's default (127.0.0.1).
+
+    "*" is refused: trusting every peer lets any client claim any address.
+    """
+    if raw is None or not raw.strip():
+        return None
+    entries: list[str] = []
+    for part in raw.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if item == "*":
+            raise ValueError(
+                "TRUSTED_PROXY_IPS=* would let any client fake its address. "
+                "Name the proxy's addresses or CIDR range instead."
+            )
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"TRUSTED_PROXY_IPS entry {item!r} is not an IP address or CIDR range") from exc
+        entries.append(str(network) if "/" in item else item)
+    return ",".join(entries) or None
+
+
 def main() -> None:
     """Entry point for `python main.py`."""
     import uvicorn
@@ -1673,7 +1711,17 @@ def main() -> None:
     print(f"LLM provider: {config.LLM_PROVIDER} (primary model {config.MODEL})")
     print(f"API key configured: {llm.credentials_configured()}")
 
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    try:
+        trusted = trusted_proxy_setting(os.environ.get("TRUSTED_PROXY_IPS"))
+    except ValueError as exc:
+        print(f"Refusing to start: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    run_options: dict = {"host": host, "port": port, "log_level": "info", "proxy_headers": True}
+    if trusted:
+        run_options["forwarded_allow_ips"] = trusted
+        print(f"Trusting X-Forwarded-For and X-Forwarded-Proto from: {trusted}")
+
+    uvicorn.run(app, **run_options)
 
 
 if __name__ == "__main__":
